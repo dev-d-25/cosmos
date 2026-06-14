@@ -3,8 +3,8 @@
 import { corsair } from "@/server/corsair";
 import { getSessionTenantId } from "@/server/auth";
 import { toListItem } from "./transformers";
-import { MailListItemSchema } from "./schemas";
-import type { MailListResponse, MailLabel, MailProfile } from "./types";
+import { InboxRefreshResponseSchema, GetProfileApiResponseSchema, MailLabelSchema, MailListItemSchema } from "./schemas";
+import type { MailLabel, MailListResponse, MailProfile } from "./types";
 
 const INBOX_LABEL = "INBOX";
 const DEFAULT_LIMIT = 50;
@@ -124,28 +124,18 @@ export async function getLabels(): Promise<MailLabel[]> {
   const cached = await client.gmail.db.labels.list();
   if (cached.length > 0) {
     return cached
-      .filter((r) => r.data.id && r.data.name)
-      .map((r) => ({
-        id: r.data.id as string,
-        name: r.data.name as string,
-        type: (r.data.type as string | undefined) ?? "user",
-        messagesTotal: (r.data.messagesTotal as number | undefined) ?? 0,
-        messagesUnread: (r.data.messagesUnread as number | undefined) ?? 0,
-        color: (r.data.color as { backgroundColor?: string } | string | undefined)?.backgroundColor ?? null,
-      }));
+      .map((r) => MailLabelSchema.safeParse(r.data))
+      .filter((result): result is { success: true; data: MailLabel } => result.success)
+      .map((result) => result.data);
   }
 
-  const result = await client.gmail.api.labels.list();
-  return (result.labels ?? [])
-    .filter((l) => l.id && l.name)
-    .map((l) => ({
-      id: l.id,
-      name: l.name,
-      type: (l.type as string | undefined) ?? "user",
-      messagesTotal: (l as Record<string, unknown>).messagesTotal ?? 0,
-      messagesUnread: (l as Record<string, unknown>).messagesUnread ?? 0,
-      color: (l as Record<string, { backgroundColor?: string } | string>).color?.backgroundColor ?? null,
-    }));
+  const result = await client.gmail.api.labels.list({});
+  const rawLabels = (result.labels ?? []) as Array<Record<string, unknown>>;
+
+  return rawLabels
+    .map((l) => MailLabelSchema.safeParse(l))
+    .filter((result): result is { success: true; data: MailLabel } => result.success)
+    .map((result) => result.data);
 }
 
 const PROFILE_TTL_MS = 5 * 60 * 1000;
@@ -159,19 +149,20 @@ export async function getProfile(): Promise<MailProfile | null> {
   const hit = profileCache.get(tenantId);
   if (hit && Date.now() - hit.at < PROFILE_TTL_MS) return hit.value;
 
-  const result = await client.gmail.api.usersGetProfile?.({});
-
-  // TODO: Tentatively resolve this from `binding` once the plugin API
-  // exposes an endpoint surface for `users.getProfile`.
-  if (!result) {
+  const corsairApi = client.gmail.api as unknown as {
+    usersGetProfile?: (opts: {}) => Promise<unknown>;
+  };
+  const raw = await corsairApi.usersGetProfile?.({});
+  if (!raw) {
     return null;
   }
 
+  const parsed = GetProfileApiResponseSchema.parse(raw);
   const value: MailProfile = {
-    emailAddress: (result as Record<string, unknown>).emailAddress as string ?? "",
-    messagesTotal: (result as Record<string, unknown>).messagesTotal as number ?? 0,
-    threadsTotal: (result as Record<string, unknown>).threadsTotal as number ?? 0,
-    historyId: (result as Record<string, unknown>).historyId as string ?? "",
+    emailAddress: parsed.emailAddress,
+    messagesTotal: parsed.messagesTotal,
+    threadsTotal: parsed.threadsTotal,
+    historyId: parsed.historyId,
     cachedAt: new Date().toISOString(),
   };
   profileCache.set(tenantId, { value, at: Date.now() });

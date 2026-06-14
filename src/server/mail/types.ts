@@ -1,8 +1,1 @@
-export type {
-  MailAttachment,
-  MailListItem,
-  MailMessage,
-  MailLabel,
-  MailProfile,
-  MailListResponse,
-} from "./schemas";
+export type { MailListItem, MailListResponse, MailAttachment, MailMessage, MailLabel, MailProfile } from "./schemas";

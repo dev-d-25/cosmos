@@ -40,7 +40,7 @@ export function extractBody(
       if (mimeType === "text/html" && !bodyHtml) bodyHtml = decoded;
       else if (mimeType === "text/plain" && !bodyText) bodyText = decoded;
     }
-    if (part.parts && Array.isArray(part.parts)) {
+    if (Array.isArray(part.parts)) {
       for (const sub of part.parts) walk(sub);
     }
   }
@@ -52,16 +52,16 @@ export function extractBody(
 export function getPartAttachments(
   payload: { parts?: any[]; mimeType?: string } | undefined,
 ): MailAttachment[] {
-  if (!payload?.parts) return [];
+  if (!Array.isArray(payload?.parts)) return [];
   const attachments: MailAttachment[] = [];
 
   function walk(part: any): void {
     if (!part) return;
     if (
-      part.filename &&
+      typeof part.filename === "string" &&
       part.filename.trim() !== "" &&
       part.body?.attachmentId &&
-      !part.mimeType?.startsWith("multipart/")
+      (typeof part.mimeType !== "string" || !part.mimeType.startsWith("multipart/"))
     ) {
       attachments.push({
         filename: part.filename,
@@ -70,10 +70,10 @@ export function getPartAttachments(
         attachmentId: part.body.attachmentId,
       });
     }
-    if (part.parts && Array.isArray(part.parts)) {
+    if (Array.isArray(part.parts)) {
       for (const sub of part.parts) {
-        if (sub.mimeType?.startsWith("multipart/")) {
-          for (const nested of sub.parts ?? []) walk(nested);
+        if (typeof sub.mimeType === "string" && sub.mimeType.startsWith("multipart/")) {
+          for (const nested of (sub.parts ?? [])) walk(nested);
         } else {
           walk(sub);
         }
@@ -87,15 +87,17 @@ export function getPartAttachments(
 
 export function toListItem(row: { data: Record<string, unknown> }): MailListItem {
   const d = row.data;
-  const internalDate = d.internalDate as number | string | Date | undefined;
-  const receivedAt = internalDate
-    ? new Date(typeof internalDate === "number" ? internalDate : Number(internalDate)).toISOString()
+  const internalDateRaw = d.internalDate as number | string | undefined;
+  const receivedAt = internalDateRaw
+    ? typeof internalDateRaw === "number"
+      ? new Date(internalDateRaw).toISOString()
+      : new Date(Number(internalDateRaw) || Date.now()).toISOString()
     : new Date().toISOString();
 
   const labelIds = (d.labelIds as string[] | undefined) ?? [];
   const id = (d.id as string | undefined) ?? "";
   const threadId = (d.threadId as string | undefined) ?? "";
-  const subject = (d.subject as string | undefined) ?? d.snippet ?? "";
+  const subject = (d.subject as string | undefined) ?? (d.snippet as string | undefined) ?? "";
   const from = (d.from as string | undefined) ?? "";
   const snippet = (d.snippet as string | undefined) ?? "";
 

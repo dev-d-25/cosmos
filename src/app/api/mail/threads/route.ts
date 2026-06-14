@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getMailList } from "@/server/mail";
 import { AuthMissingError } from "corsair/core";
 import { getSessionTenantId } from "@/server/auth";
+import { z } from "zod";
 import { MailThreadsQuerySchema, MailListResponseSchema } from "@/server/mail/schemas";
 
 export async function GET(request: Request) {
@@ -30,6 +31,7 @@ export async function GET(request: Request) {
     if (err instanceof z.ZodError) {
       return NextResponse.json({ error: "Invalid request", details: err.issues }, { status: 400 });
     }
-    throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

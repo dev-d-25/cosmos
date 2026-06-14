@@ -7,7 +7,7 @@ import { MailMessageSchema, MailMessageQuerySchema } from "@/server/mail/schemas
 
 export async function GET(
   _req: Request,
-  { params }: { params: { id: string } },
+  { params }: { params: Promise<{ id: string }> },
 ) {
   const tenantId = await getSessionTenantId();
   if (!tenantId) {
@@ -15,21 +15,18 @@ export async function GET(
   }
 
   try {
+    const { id } = await params;
     const rawRefresh = new URL(_req.url).searchParams.get("refresh");
 
     const query = MailMessageQuerySchema.parse({
       refresh: rawRefresh,
     });
 
-    const result = await getMessage(params.id, { force: query.refresh === "true" });
+    const result = await getMessage(id, { force: query.refresh === "true" });
     if (!result) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    const validated = {
-      message: MailMessageSchema.safeParse(result.message),
-      source: result.source,
-    };
-
-    if (!validated.message.success) {
+    const parsed = MailMessageSchema.safeParse(result.message);
+    if (!parsed.success) {
       return NextResponse.json(
         { error: "Invalid message data" },
         { status: 500 },
@@ -37,8 +34,8 @@ export async function GET(
     }
 
     return NextResponse.json({
-      message: validated.message.data,
-      source: validated.source,
+      message: parsed.data,
+      source: result.source,
     });
   } catch (err) {
     if (err instanceof AuthMissingError) {
@@ -47,6 +44,7 @@ export async function GET(
     if (err instanceof z.ZodError) {
       return NextResponse.json({ error: "Invalid request", details: err.issues }, { status: 400 });
     }
-    throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

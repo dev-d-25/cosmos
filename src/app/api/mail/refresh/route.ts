@@ -22,6 +22,7 @@ export async function POST() {
     if (err instanceof z.ZodError) {
       return NextResponse.json({ error: "Invalid response", details: err.issues }, { status: 500 });
     }
-    throw err;
+    const message = err instanceof Error ? err.message : String(err);
+    return NextResponse.json({ error: message }, { status: 500 });
   }
 }

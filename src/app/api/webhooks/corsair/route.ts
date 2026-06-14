@@ -1,4 +1,5 @@
-import { corsair, processWebhook } from "corsair";
+import { processWebhook } from "corsair";
+import { corsair } from "@/server/corsair";
 import { NextResponse } from "next/server";
 
 export async function POST(req: Request) {
@@ -7,8 +8,5 @@ export async function POST(req: Request) {
   const result = await processWebhook(corsair, headers, body, {
     tenantId: "default",
   });
-  return NextResponse.json(
-    result,
-    { status: (result as { success: boolean }).success ? 200 : 400 },
-  );
+  return NextResponse.json(result);
 }
