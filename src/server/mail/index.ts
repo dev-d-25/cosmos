@@ -86,19 +86,29 @@ export async function getMailList(
 
   // Cache-only page: requested via "cache:N" token. No API call, ever.
   if (cacheTokenPage !== null) {
-    const cachedAll = await ctx.client.gmail.db.messages.list({
-      limit: (cacheTokenPage + 1) * pageSize,
+    const limit = (cacheTokenPage + 1) * pageSize;
+    const isCacheFiltered =
+      labelIds.length > 0 && labelIds[0] !== INBOX_LABEL;
+    const cacheLimit = isCacheFiltered ? limit * 10 : limit;
+    let cachedAll = await ctx.client.gmail.db.messages.list({
+      limit: cacheLimit,
       offset: 0,
     });
     if (cachedAll.length === 0) {
       return { items: [], nextPageToken: null, source: "cache" };
     }
-    const total = await ctx.client.gmail.db.messages.count();
-    const page = sortByReceivedDesc(rowsToListItems(cachedAll)).slice(
+    let cacheFiltered = cachedAll;
+    if (isCacheFiltered) {
+      cacheFiltered = cachedAll.filter((r) => {
+        const rowLabels = (r.data.labelIds as string[] | undefined) ?? [];
+        return labelIds.every((label) => rowLabels.includes(label));
+      });
+    }
+    const page = sortByReceivedDesc(rowsToListItems(cacheFiltered)).slice(
       cacheTokenPage * pageSize,
       (cacheTokenPage + 1) * pageSize,
     );
-    const hasMore = total > (cacheTokenPage + 1) * pageSize;
+    const hasMore = cacheFiltered.length > (cacheTokenPage + 1) * pageSize;
     return {
       items: page,
       nextPageToken: hasMore ? makeCachePageToken(cacheTokenPage + 1) : null,
@@ -109,11 +119,17 @@ export async function getMailList(
   const pageIndex = Math.max(0, Math.floor(opts.pageIndex ?? 0));
   const offset = pageIndex * pageSize;
   const totalNeeded = offset + pageSize;
+  const isFilteredLabel =
+    labelIds.length > 0 && labelIds[0] !== INBOX_LABEL;
+  // When filtering by label, load extra messages since many may not match.
+  const cacheLoadLimit = isFilteredLabel
+    ? totalNeeded * 10
+    : totalNeeded;
 
   // Tier 1, step 1-2: serve from cache when possible.
   if (!opts.force && !hasGmailToken) {
     let cachedAll = await ctx.client.gmail.db.messages.list({
-      limit: totalNeeded,
+      limit: cacheLoadLimit,
       offset: 0,
     });
     if (cachedAll.length > 0) {
@@ -140,27 +156,27 @@ export async function getMailList(
         }
         // Re-read cache after enrichment to pick up from/subject
         cachedAll = await ctx.client.gmail.db.messages.list({
-          limit: totalNeeded,
+          limit: cacheLoadLimit,
           offset: 0,
         });
       }
 
-      const total = await ctx.client.gmail.db.messages.count();
       let cacheFiltered = cachedAll;
-      if (labelIds.length > 0 && labelIds[0] !== INBOX_LABEL) {
+      if (isFilteredLabel) {
         cacheFiltered = cachedAll.filter((r) => {
           const rowLabels = (r.data.labelIds as string[] | undefined) ?? [];
           return labelIds.every((label) => rowLabels.includes(label));
         });
       }
       const cacheCoversPage =
-        cacheFiltered.length >= totalNeeded || cacheFiltered.length >= total;
+        cacheFiltered.length >= totalNeeded ||
+        cachedAll.length < cacheLoadLimit;
       if (cacheCoversPage) {
         const page = sortByReceivedDesc(rowsToListItems(cacheFiltered)).slice(
           offset,
           offset + pageSize,
         );
-        const hasMore = total > (pageIndex + 1) * pageSize;
+        const hasMore = cacheFiltered.length > (pageIndex + 1) * pageSize;
         return {
           items: page,
           nextPageToken: hasMore ? makeCachePageToken(pageIndex + 1) : null,
@@ -227,18 +243,27 @@ export async function getMailList(
   }
 
   // Re-read whatever the cache now holds for this page slice.
-  const rows = await ctx.client.gmail.db.messages.list({
-    limit: totalNeeded,
+  const fetchLimit = isFilteredLabel ? totalNeeded * 10 : totalNeeded;
+  let rows = await ctx.client.gmail.db.messages.list({
+    limit: fetchLimit,
     offset: 0,
   });
+  if (isFilteredLabel) {
+    rows = rows.filter((r) => {
+      const rowLabels = (r.data.labelIds as string[] | undefined) ?? [];
+      return labelIds.every((label) => rowLabels.includes(label));
+    });
+  }
   const page = sortByReceivedDesc(rowsToListItems(rows)).slice(
     offset,
     offset + pageSize,
   );
 
+  const hasMore =
+    rows.length > (pageIndex + 1) * pageSize || nextToken !== null;
   return {
     items: page,
-    nextPageToken: nextToken,
+    nextPageToken: hasMore ? makeCachePageToken(pageIndex + 1) : null,
     source: "live",
   };
 }
