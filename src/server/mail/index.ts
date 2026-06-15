@@ -475,12 +475,27 @@ export async function getProfile(): Promise<MailProfile | null> {
   }
 
   const parsed = GetProfileApiResponseSchema.parse(raw);
+
+  // Fetch user name and picture from session
+  let name = "";
+  let picture = "";
+  try {
+    const { getSession } = await import("@/server/better-auth/server");
+    const session = await getSession();
+    name = (session?.user as { name?: string })?.name ?? "";
+    picture = (session?.user as { image?: string })?.image ?? "";
+  } catch {
+    // Fall back to email-derived name
+  }
+
   const value: MailProfile = {
     emailAddress: parsed.emailAddress,
     messagesTotal: parsed.messagesTotal,
     threadsTotal: parsed.threadsTotal,
     historyId: parsed.historyId,
     cachedAt: new Date().toISOString(),
+    name: name || parsed.emailAddress?.split("@")[0] || "",
+    picture,
   };
   profileCache.set(tenantId, { value, at: Date.now() });
   return value;
@@ -529,4 +544,339 @@ export async function getMailPageData(
   ]);
 
   return { tenantId, gmailConnected: true, view, list, profile, labels };
+}
+
+// ─── Thread Actions ──────────────────────────────────────────────────────────
+
+export async function archiveThread(threadId: string): Promise<void> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+  await ctx.client.gmail.api.threads.modify({
+    id: threadId,
+    removeLabelIds: ["INBOX"],
+  });
+}
+
+export async function unarchiveThread(threadId: string): Promise<void> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+  await ctx.client.gmail.api.threads.modify({
+    id: threadId,
+    addLabelIds: ["INBOX"],
+  });
+}
+
+export async function trashThread(threadId: string): Promise<void> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+  await ctx.client.gmail.api.threads.trash({ id: threadId });
+}
+
+export async function untrashThread(threadId: string): Promise<void> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+  await ctx.client.gmail.api.threads.untrash({ id: threadId });
+}
+
+export async function starThread(threadId: string): Promise<void> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+  await ctx.client.gmail.api.threads.modify({
+    id: threadId,
+    addLabelIds: ["STARRED"],
+  });
+}
+
+export async function unstarThread(threadId: string): Promise<void> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+  await ctx.client.gmail.api.threads.modify({
+    id: threadId,
+    removeLabelIds: ["STARRED"],
+  });
+}
+
+export async function markAsUnread(ids: string[]): Promise<void> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+  await ctx.client.gmail.api.messages.batchModify({
+    ids,
+    addLabelIds: ["UNREAD"],
+  });
+}
+
+export async function moveToSpam(threadId: string): Promise<void> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+  await ctx.client.gmail.api.threads.modify({
+    id: threadId,
+    addLabelIds: ["SPAM"],
+    removeLabelIds: ["INBOX"],
+  });
+}
+
+export async function moveThreadToLabel(
+  threadId: string,
+  labelId: string,
+): Promise<void> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+  await ctx.client.gmail.api.threads.modify({
+    id: threadId,
+    addLabelIds: [labelId],
+  });
+}
+
+export async function removeLabelFromThread(
+  threadId: string,
+  labelId: string,
+): Promise<void> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+  await ctx.client.gmail.api.threads.modify({
+    id: threadId,
+    removeLabelIds: [labelId],
+  });
+}
+
+export async function deleteThread(threadId: string): Promise<void> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+  await ctx.client.gmail.api.threads.delete({ id: threadId });
+}
+
+// ─── Send / Reply / Forward ──────────────────────────────────────────────────
+
+import {
+  buildEncodedMimeMessage,
+  buildReplyMimeMessage,
+  buildForwardMimeMessage,
+  extractEmail,
+  extractName,
+  type MimeAttachment,
+} from "./mime";
+
+export interface SendEmailParams {
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  html?: string;
+  text?: string;
+  threadId?: string;
+  inReplyTo?: string;
+  references?: string;
+  attachments?: MimeAttachment[];
+}
+
+export async function sendEmail(
+  params: SendEmailParams,
+): Promise<{ id: string; threadId: string }> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+
+  const profile = await getProfile();
+  const from = profile?.emailAddress;
+
+  let raw: string;
+
+  if (params.inReplyTo) {
+    raw = buildReplyMimeMessage({
+      from,
+      to: params.to,
+      cc: params.cc,
+      subject: params.subject,
+      html: params.html,
+      text: params.text,
+      inReplyTo: params.inReplyTo,
+      references: params.references || params.inReplyTo,
+      attachments: params.attachments,
+    });
+  } else {
+    raw = buildEncodedMimeMessage({
+      from,
+      to: params.to,
+      cc: params.cc,
+      bcc: params.bcc,
+      subject: params.subject,
+      html: params.html,
+      text: params.text,
+      attachments: params.attachments,
+    });
+  }
+
+  const result = await ctx.client.gmail.api.messages.send({
+    raw,
+    threadId: params.threadId,
+  });
+
+  return {
+    id: (result as { id?: string }).id || "",
+    threadId: (result as { threadId?: string }).threadId || params.threadId || "",
+  };
+}
+
+export async function replyToMessage(
+  messageId: string,
+  body: string,
+  options: { replyAll?: boolean; html?: boolean } = {},
+): Promise<{ id: string; threadId: string }> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+
+  // Fetch the original message to get headers
+  const original = await ctx.client.gmail.api.messages.get({
+    id: messageId,
+    format: "metadata",
+    metadataHeaders: ["From", "To", "Cc", "Subject", "Message-ID", "References", "Date"],
+  });
+
+  const payload = (original as { payload?: { headers?: Array<{ name?: string; value?: string }> } }).payload;
+  const headers = payload?.headers || [];
+  const getHeader = (name: string) =>
+    headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value || "";
+
+  const originalFrom = getHeader("From");
+  const originalTo = getHeader("To");
+  const originalCc = getHeader("Cc");
+  const originalSubject = getHeader("Subject");
+  const originalMessageId = getHeader("Message-ID");
+  const originalReferences = getHeader("References");
+  const threadId = (original as { threadId?: string }).threadId || "";
+
+  // Build recipient list
+  const profile = await getProfile();
+  const myEmail = profile?.emailAddress?.toLowerCase() || "";
+  const replyTo: string[] = [];
+
+  // Always reply to the sender
+  if (originalFrom) {
+    const senderEmail = extractEmail(originalFrom).toLowerCase();
+    if (senderEmail !== myEmail) {
+      replyTo.push(originalFrom);
+    }
+  }
+
+  if (options.replyAll) {
+    // Add all To recipients (except self and original sender)
+    if (originalTo) {
+      for (const addr of originalTo.split(",")) {
+        const email = extractEmail(addr).toLowerCase();
+        if (email !== myEmail && email !== extractEmail(originalFrom).toLowerCase()) {
+          replyTo.push(addr.trim());
+        }
+      }
+    }
+    // Add CC recipients (except self)
+    if (originalCc) {
+      const ccRecipients: string[] = [];
+      for (const addr of originalCc.split(",")) {
+        const email = extractEmail(addr).toLowerCase();
+        if (email !== myEmail) {
+          ccRecipients.push(addr.trim());
+        }
+      }
+      if (ccRecipients.length > 0) {
+        // Send with CC
+        const subject = originalSubject.startsWith("Re:")
+          ? originalSubject
+          : `Re: ${originalSubject}`;
+
+        const references = originalReferences
+          ? `${originalReferences} ${originalMessageId}`
+          : originalMessageId;
+
+        return sendEmail({
+          to: replyTo,
+          cc: ccRecipients,
+          subject,
+          html: options.html !== false ? body : undefined,
+          text: options.html === false ? body : undefined,
+          threadId,
+          inReplyTo: originalMessageId,
+          references,
+        });
+      }
+    }
+  }
+
+  // If no valid recipients, fall back to original sender
+  if (replyTo.length === 0 && originalFrom) {
+    replyTo.push(originalFrom);
+  }
+
+  const subject = originalSubject.startsWith("Re:")
+    ? originalSubject
+    : `Re: ${originalSubject}`;
+
+  const references = originalReferences
+    ? `${originalReferences} ${originalMessageId}`
+    : originalMessageId;
+
+  return sendEmail({
+    to: replyTo,
+    subject,
+    html: options.html !== false ? body : undefined,
+    text: options.html === false ? body : undefined,
+    threadId,
+    inReplyTo: originalMessageId,
+    references,
+  });
+}
+
+export async function forwardMessage(
+  messageId: string,
+  to: string[],
+  body?: string,
+): Promise<{ id: string; threadId: string }> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+
+  // Fetch the original message
+  const original = await ctx.client.gmail.api.messages.get({
+    id: messageId,
+    format: "metadata",
+    metadataHeaders: ["From", "To", "Cc", "Subject", "Date"],
+  });
+
+  const payload = (original as { payload?: { headers?: Array<{ name?: string; value?: string }> } }).payload;
+  const headers = payload?.headers || [];
+  const getHeader = (name: string) =>
+    headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value || "";
+
+  const originalFrom = getHeader("From");
+  const originalTo = getHeader("To");
+  const originalSubject = getHeader("Subject");
+  const originalDate = getHeader("Date");
+  const threadId = (original as { threadId?: string }).threadId || "";
+
+  const profile = await getProfile();
+  const from = profile?.emailAddress;
+
+  const subject = originalSubject.startsWith("Fwd:")
+    ? originalSubject
+    : `Fwd: ${originalSubject}`;
+
+  const raw = buildForwardMimeMessage({
+    from,
+    to,
+    subject,
+    html: body,
+    text: body,
+    originalFrom,
+    originalDate,
+    originalSubject,
+    originalTo,
+    originalBody: "",
+  });
+
+  const result = await ctx.client.gmail.api.messages.send({
+    raw,
+    threadId,
+  });
+
+  return {
+    id: (result as { id?: string }).id || "",
+    threadId: (result as { threadId?: string }).threadId || threadId,
+  };
 }

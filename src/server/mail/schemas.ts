@@ -47,6 +47,8 @@ export const MailProfileSchema = z.object({
   threadsTotal: z.number().optional().default(0),
   historyId: z.string().optional().default(""),
   cachedAt: z.string().optional().default(""),
+  name: z.string().optional().default(""),
+  picture: z.string().optional().default(""),
 });
 
 export const MailListResponseSchema = z.object({

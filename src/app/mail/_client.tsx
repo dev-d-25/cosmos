@@ -27,6 +27,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Kbd } from "@/components/ui/kbd";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import { ShortcutsHelp } from "@/components/shortcuts-help";
+import { ComposeDialog } from "@/components/compose-dialog";
 import {
   CommandDialog,
   CommandInput,
@@ -85,7 +87,7 @@ const LABEL_DEFS: LabelDef[] = [
     id: "STARRED",
     name: "Starred",
     icon: (
-      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1">
         <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 1.01 12 2" />
       </svg>
     ),
@@ -339,10 +341,12 @@ function MailSidebar({
   labels,
   activeLabel,
   profile,
+  onCompose,
 }: {
   labels: MailLabel[];
   activeLabel: string;
   profile: MailProfile | null;
+  onCompose: () => void;
 }) {
   const email = profile?.emailAddress ?? "";
   const labelMap = useMemo(() => {
@@ -353,13 +357,17 @@ function MailSidebar({
 
   return (
     <aside className="border-sidebar-border bg-sidebar flex h-full flex-col gap-0 overflow-y-auto border-r p-0">
-      <div className="px-4 py-3">
-        <div className="flex items-center gap-2">
-          <span className="bg-destructive text-primary-foreground flex size-5 items-center justify-center text-[0.625rem] font-black">
-            G
-          </span>
-          <span className="truncate text-xs font-semibold">{email || "Gmail"}</span>
-        </div>
+      <div className="px-3 py-3">
+        <Button
+          onClick={onCompose}
+          className="bg-primary text-primary-foreground hover:bg-primary/90 w-full justify-start gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M12 20h9" />
+            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+          </svg>
+          Compose
+        </Button>
       </div>
 
       <div className="bg-border mx-4 mb-2 h-px" />
@@ -597,6 +605,15 @@ function MailList({
   labelName,
   searchQuery,
   onClearSearch,
+  onArchive,
+  onDelete,
+  onStar,
+  onMarkUnread,
+  onReply,
+  onReplyAll,
+  onForward,
+  onCompose,
+  onSearch,
 }: {
   items: MailListItem[];
   selectedId: string | null;
@@ -611,6 +628,15 @@ function MailList({
   labelName: string;
   searchQuery?: string;
   onClearSearch?: () => void;
+  onArchive: (id: string) => void;
+  onDelete: (id: string) => void;
+  onStar: (id: string) => void;
+  onMarkUnread: (id: string) => void;
+  onReply: (id: string) => void;
+  onReplyAll: (id: string) => void;
+  onForward: (id: string) => void;
+  onCompose: () => void;
+  onSearch: () => void;
 }) {
   if (isInitialLoading) {
     return (
@@ -709,6 +735,7 @@ function MailList({
         {items.map((item) => {
           const isSelected = selectedId === item.id;
           const isRead = !item.unread || isReadLocally(item.id);
+          const currentIndex = items.findIndex((i) => i.id === selectedId);
           return (
             <button
               key={item.id}
@@ -839,6 +866,7 @@ function MailViewer({
   messageError,
   onRetryMessage,
   onCloseMessage,
+  onAction,
   labelName,
 }: {
   gmailConnected: boolean;
@@ -849,6 +877,7 @@ function MailViewer({
   messageError: string | null;
   onRetryMessage: () => void;
   onCloseMessage: () => void;
+  onAction: (action: string, threadId: string, extra?: Record<string, unknown>) => void;
   labelName: string;
 }) {
   const router = useRouter();
@@ -910,27 +939,43 @@ function MailViewer({
           </svg>
         </MailToolbarButton>
         <div className="bg-border mx-1 h-5 w-px" />
-        <MailToolbarButton label="Archive" shortcut="E">
+        <MailToolbarButton
+          label="Archive"
+          shortcut="E"
+          onClick={() => selectedListItem && onAction("archive", selectedListItem.threadId)}
+        >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="21 8 21 21 3 21 3 8" />
             <rect x="1" y="3" width="22" height="5" />
             <line x1="10" y1="12" x2="14" y2="12" />
           </svg>
         </MailToolbarButton>
-        <MailToolbarButton label="Delete" shortcut="#">
+        <MailToolbarButton
+          label="Delete"
+          shortcut="#"
+          onClick={() => selectedListItem && onAction("trash", selectedListItem.threadId)}
+        >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="3 6 5 6 21 6" />
             <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
           </svg>
         </MailToolbarButton>
-        <MailToolbarButton label="Mark Unread" shortcut="U">
+        <MailToolbarButton
+          label="Mark Unread"
+          shortcut="U"
+          onClick={() => selectedListItem && onAction("markUnread", selectedListItem.threadId, { ids: [selectedListItem.id] })}
+        >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="12" cy="12" r="10" />
             <line x1="12" y1="8" x2="12" y2="12" />
             <line x1="12" y1="16" x2="12.01" y2="16" />
           </svg>
         </MailToolbarButton>
-        <MailToolbarButton label="Star" shortcut="S">
+        <MailToolbarButton
+          label="Star"
+          shortcut="S"
+          onClick={() => selectedListItem && onAction("star", selectedListItem.threadId)}
+        >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 1.01 12 2" />
           </svg>
@@ -951,11 +996,23 @@ function MailViewer({
           </svg>
         </MailToolbarButton>
         <div className="bg-border mx-1 h-5 w-px" />
-        <MailToolbarButton label="Ask AI" shortcut="?">
-          <svg className="text-primary" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-          </svg>
-        </MailToolbarButton>
+        <ShortcutsHelp>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <div className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md">
+                  <svg className="text-primary" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+                  </svg>
+                </div>
+              }
+            />
+            <TooltipContent side="bottom" sideOffset={6}>
+              <span>Keyboard Shortcuts</span>
+              <Kbd className="ml-1">?</Kbd>
+            </TooltipContent>
+          </Tooltip>
+        </ShortcutsHelp>
         {message || messageLoading || messageError ? (
           <Button
             type="button"
@@ -1141,6 +1198,7 @@ export function MailInterface({
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [searchInput, setSearchInput] = useState<string>("");
   const [searchOpen, setSearchOpen] = useState(false);
+  const [composeOpen, setComposeOpen] = useState(false);
 
   const gmailParams = searchQuery
     ? { query: searchQuery }
@@ -1184,6 +1242,11 @@ export function MailInterface({
   // ─── Ctrl+K to open search ────────────────────────────────────────────
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
+      // Don't trigger shortcuts when typing in inputs
+      const target = e.target as HTMLElement;
+      if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) {
+        return;
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
         setSearchOpen((prev) => !prev);
@@ -1289,6 +1352,31 @@ export function MailInterface({
     });
   }, [clearCacheMutation, threadsQuery, labelsQuery, profileQuery]);
 
+  const onMailAction = useCallback(
+    async (action: string, threadId: string, extra?: Record<string, unknown>) => {
+      try {
+        const res = await fetch("/api/mail/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action, threadId, ...extra }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ error: "Unknown error" }));
+          console.error(`[mail action] ${action} failed:`, err.error);
+          return;
+        }
+        // Optimistic: close viewer and refetch list for destructive actions
+        if (["archive", "trash", "delete", "spam"].includes(action)) {
+          setSelectedId(null);
+        }
+        threadsQuery.refetch();
+      } catch (err) {
+        console.error(`[mail action] ${action} error:`, err);
+      }
+    },
+    [threadsQuery],
+  );
+
   // ─── Keyboard shortcuts ────────────────────────────────────────────────
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -1302,6 +1390,8 @@ export function MailInterface({
       ) {
         return;
       }
+      // Don't fire shortcuts when dialogs are open
+      if (composeOpen || searchOpen) return;
       if (!items.length) return;
 
       if (event.key === "j" || event.key === "ArrowDown") {
@@ -1329,11 +1419,32 @@ export function MailInterface({
           event.preventDefault();
           onClose();
         }
+      } else if (event.key === "e" && selectedId) {
+        event.preventDefault();
+        onMailAction("archive", selectedId);
+      } else if (event.key === "#" && selectedId) {
+        event.preventDefault();
+        onMailAction("trash", selectedId);
+      } else if (event.key === "s" && selectedId) {
+        event.preventDefault();
+        onMailAction("star", selectedId);
+      } else if (event.key === "u" && selectedId) {
+        event.preventDefault();
+        onMailAction("markUnread", selectedId);
+      } else if (event.key === "r" && selectedId) {
+        event.preventDefault();
+        // TODO: open reply compose
+      } else if (event.key === "f" && selectedId) {
+        event.preventDefault();
+        // TODO: open forward compose
+      } else if (event.key === "l" && selectedId) {
+        event.preventDefault();
+        // TODO: open label picker
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [items, selectedId, onOpen, onClose]);
+  }, [items, selectedId, onOpen, onClose, onMailAction, composeOpen, searchOpen]);
 
   return (
     <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
@@ -1348,7 +1459,7 @@ export function MailInterface({
       />
       <ResizablePanelGroup className="min-h-0 flex-1">
         <ResizablePanel defaultSize={16} minSize={12}>
-          <MailSidebar labels={labels} activeLabel={activeLabel} profile={profile} />
+          <MailSidebar labels={labels} activeLabel={activeLabel} profile={profile} onCompose={() => setComposeOpen(true)} />
         </ResizablePanel>
         <ResizableHandle withHandle />
         <ResizablePanel defaultSize={30} minSize={20}>
@@ -1375,6 +1486,15 @@ export function MailInterface({
                 setSearchQuery("");
                 setSearchInput("");
               }}
+              onArchive={(id) => onMailAction("archive", id)}
+              onDelete={(id) => onMailAction("trash", id)}
+              onStar={(id) => onMailAction("star", id)}
+              onMarkUnread={(id) => onMailAction("markUnread", id)}
+              onReply={() => {}}
+              onReplyAll={() => {}}
+              onForward={() => {}}
+              onCompose={() => setComposeOpen(true)}
+              onSearch={() => setSearchOpen(true)}
             />
           </div>
         </ResizablePanel>
@@ -1389,6 +1509,7 @@ export function MailInterface({
             messageError={messageQuery.error?.message ?? null}
             onRetryMessage={() => messageQuery.refetch()}
             onCloseMessage={onClose}
+            onAction={onMailAction}
             labelName={labelName}
           />
         </ResizablePanel>
@@ -1460,6 +1581,12 @@ export function MailInterface({
           </CommandGroup>
         </CommandList>
       </CommandDialog>
+
+      {/* Compose dialog */}
+      <ComposeDialog
+        open={composeOpen}
+        onOpenChange={setComposeOpen}
+      />
     </div>
   );
 }
