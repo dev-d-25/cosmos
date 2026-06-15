@@ -1,10 +1,20 @@
 "use server";
 
-import { corsair } from "@/server/corsair";
+import { corsair, getConnectedCorsairPlugins } from "@/server/corsair";
 import { getSessionTenantId } from "@/server/auth";
 import { toListItem } from "./transformers";
-import { InboxRefreshResponseSchema, GetProfileApiResponseSchema, MailLabelSchema, MailListItemSchema } from "./schemas";
-import type { MailLabel, MailListResponse, MailProfile } from "./types";
+import {
+  InboxRefreshResponseSchema,
+  GetProfileApiResponseSchema,
+  MailLabelSchema,
+  MailListItemSchema,
+} from "./schemas";
+import type {
+  MailLabel,
+  MailListResponse,
+  MailPageData,
+  MailProfile,
+} from "./types";
 
 const INBOX_LABEL = "INBOX";
 const DEFAULT_LIMIT = 50;
@@ -24,7 +34,10 @@ export async function getMailList(
   const limit = opts.limit ?? DEFAULT_LIMIT;
 
   if (!opts.force) {
-    const cached = await ctx.client.gmail.db.messages.list({ limit, offset: 0 });
+    const cached = await ctx.client.gmail.db.messages.list({
+      limit,
+      offset: 0,
+    });
     if (cached.length > 0 && cached.some((r) => r.data.subject)) {
       return {
         items: cached
@@ -85,7 +98,10 @@ async function warmInboxCache(
 export async function getMessage(
   id: string,
   opts: { force?: boolean } = {},
-): Promise<{ message: Record<string, unknown>; source: "cache" | "live" } | null> {
+): Promise<{
+  message: Record<string, unknown>;
+  source: "cache" | "live";
+} | null> {
   const ctx = await getClient();
   if (!ctx) return null;
   const { client } = ctx;
@@ -93,7 +109,10 @@ export async function getMessage(
   if (!opts.force) {
     const cached = await client.gmail.db.messages.findByEntityId(id);
     if (cached?.data?.payload) {
-      return { message: cached.data as Record<string, unknown>, source: "cache" };
+      return {
+        message: cached.data as Record<string, unknown>,
+        source: "cache",
+      };
     }
   }
 
@@ -125,7 +144,10 @@ export async function getLabels(): Promise<MailLabel[]> {
   if (cached.length > 0) {
     return cached
       .map((r) => MailLabelSchema.safeParse(r.data))
-      .filter((result): result is { success: true; data: MailLabel } => result.success)
+      .filter(
+        (result): result is { success: true; data: MailLabel } =>
+          result.success,
+      )
       .map((result) => result.data);
   }
 
@@ -134,7 +156,9 @@ export async function getLabels(): Promise<MailLabel[]> {
 
   return rawLabels
     .map((l) => MailLabelSchema.safeParse(l))
-    .filter((result): result is { success: true; data: MailLabel } => result.success)
+    .filter(
+      (result): result is { success: true; data: MailLabel } => result.success,
+    )
     .map((result) => result.data);
 }
 
@@ -167,4 +191,25 @@ export async function getProfile(): Promise<MailProfile | null> {
   };
   profileCache.set(tenantId, { value, at: Date.now() });
   return value;
+}
+
+export async function getMailPageData(
+  opts: { force?: boolean } = {},
+): Promise<MailPageData | null> {
+  const tenantId = await getSessionTenantId();
+  if (!tenantId) return null;
+
+  const plugins = await getConnectedCorsairPlugins(tenantId);
+  const gmailConnected = plugins.includes("gmail");
+  if (!gmailConnected) {
+    return { tenantId, gmailConnected: false };
+  }
+
+  const [list, profile, labels] = await Promise.all([
+    getMailList({ limit: DEFAULT_LIMIT, force: opts.force }),
+    getProfile(),
+    getLabels(),
+  ]);
+
+  return { tenantId, gmailConnected: true, list, profile, labels };
 }

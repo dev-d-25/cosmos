@@ -57,7 +57,10 @@ export async function GET(request: NextRequest) {
     });
 
     const response = NextResponse.redirect(
-      new URL("/?connected=" + encodeURIComponent(result.plugin), request.url),
+      new URL(
+        "/mail?connected=" + encodeURIComponent(result.plugin),
+        request.url,
+      ),
     );
     response.cookies.delete("oauth_state");
     return response;

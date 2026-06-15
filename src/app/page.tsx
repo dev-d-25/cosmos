@@ -1,15 +1,16 @@
 import Image from "next/image";
+import { redirect } from "next/navigation";
 
 import { getSession } from "@/server/better-auth/server";
-import { SignInButton, SignOutButton } from "@/components/auth-buttons";
-import { ConnectButton } from "@/components/connect-button";
+import { SignInButton } from "@/components/auth-buttons";
 import { ThemeToggle } from "@/components/theme-toggle";
 
 export default async function Home() {
   const session = await getSession();
+  if (session) redirect("/mail");
 
   return (
-    <main className="flex min-h-screen flex-col items-center justify-center bg-background p-8">
+    <main className="bg-background flex min-h-screen flex-col items-center justify-center p-8">
       <div className="absolute top-4 right-4">
         <ThemeToggle />
       </div>
@@ -21,7 +22,7 @@ export default async function Home() {
           width={400}
           height={120}
           priority
-          className="w-[280px] sm:w-[360px] block dark:hidden"
+          className="block w-[280px] sm:w-[360px] dark:hidden"
         />
         <Image
           src="/cosmos-logo.webp"
@@ -29,24 +30,14 @@ export default async function Home() {
           width={400}
           height={120}
           priority
-          className="w-[280px] sm:w-[360px] hidden dark:block"
+          className="hidden w-[280px] sm:w-[360px] dark:block"
         />
 
-        <p className="text-xs font-medium tracking-[0.25em] text-muted-foreground uppercase">
+        <p className="text-muted-foreground text-xs font-medium tracking-[0.25em] uppercase">
           AI Email &amp; Calendar Command Center
         </p>
 
-        {session ? (
-          <div className="flex flex-col items-center gap-4">
-            <div className="flex gap-3">
-              <ConnectButton plugin="gmail" />
-              <ConnectButton plugin="googlecalendar" />
-            </div>
-            <SignOutButton />
-          </div>
-        ) : (
-          <SignInButton />
-        )}
+        <SignInButton />
       </div>
     </main>
   );
