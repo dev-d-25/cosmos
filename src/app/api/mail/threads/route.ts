@@ -22,6 +22,7 @@ export async function GET(request: Request) {
     const rawRefresh = url.searchParams.get("refresh") ?? undefined;
     const rawLabelIds = url.searchParams.get("labelIds") ?? undefined;
     const labelIds = rawLabelIds ? rawLabelIds.split(",").filter(Boolean) : undefined;
+    const rawQ = url.searchParams.get("q") ?? undefined;
 
     const query = MailThreadsQuerySchema.parse({
       page: rawPage,
@@ -36,6 +37,7 @@ export async function GET(request: Request) {
       pageToken: query.token ?? null,
       force: query.refresh === "true",
       labelIds,
+      q: rawQ,
     });
     const validated = MailListResponseSchema.parse(data);
     return NextResponse.json(validated);

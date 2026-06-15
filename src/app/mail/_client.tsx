@@ -26,6 +26,15 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Kbd } from "@/components/ui/kbd";
+import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
+import {
+  CommandDialog,
+  CommandInput,
+  CommandList,
+  CommandEmpty,
+  CommandGroup,
+  CommandItem,
+} from "@/components/ui/command";
 import {
   ResizableHandle,
   ResizablePanel,
@@ -48,6 +57,7 @@ import {
   useRefreshInbox,
   useClearMailCache,
 } from "@/hooks/use-mail";
+import { markAsReadLocally, isReadLocally } from "@/lib/read-emails";
 
 // ─── Label definitions ──────────────────────────────────────────────────────
 
@@ -56,6 +66,7 @@ interface LabelDef {
   name: string;
   icon: ReactNode;
   gmailLabel?: string;
+  gmailQuery?: string;
 }
 
 const LABEL_DEFS: LabelDef[] = [
@@ -112,6 +123,7 @@ const LABEL_DEFS: LabelDef[] = [
         <line x1="10" y1="12" x2="14" y2="12" />
       </svg>
     ),
+    gmailQuery: "-label:inbox",
   },
   {
     id: "SPAM",
@@ -206,23 +218,48 @@ const LABEL_DEFS: LabelDef[] = [
   },
 ];
 
-function getLabelIdsForView(view: string): string[] | undefined {
+function getGmailParamsForView(view: string): { labelIds?: string[]; query?: string } {
   const def = LABEL_DEFS.find((l) => l.id === view);
-  if (!def?.gmailLabel) return undefined;
-  return [def.gmailLabel];
+  if (!def) return {};
+  if (def.gmailQuery) return { query: def.gmailQuery };
+  if (def.gmailLabel) return { labelIds: [def.gmailLabel] };
+  return {};
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function MailToolbarButton({ children }: { children: ReactNode }) {
+function MailToolbarButton({
+  children,
+  label,
+  shortcut,
+  onClick,
+  variant = "ghost",
+}: {
+  children: ReactNode;
+  label: string;
+  shortcut?: string;
+  onClick?: () => void;
+  variant?: "ghost" | "destructive";
+}) {
   return (
-    <Button
-      variant="ghost"
-      size="icon-xs"
-      className="text-muted-foreground flex min-w-[54px] flex-col gap-0.5 border border-transparent px-2.5 py-1 text-[0.625rem] font-medium tracking-wider uppercase"
-    >
-      {children}
-    </Button>
+    <Tooltip>
+      <TooltipTrigger
+        render={
+          <Button
+            variant={variant}
+            size="icon-xs"
+            className="text-muted-foreground hover:bg-accent hover:text-foreground h-8 w-8 shrink-0"
+            onClick={onClick}
+          />
+        }
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent side="bottom" sideOffset={6}>
+        <span>{label}</span>
+        {shortcut && <Kbd className="ml-1">{shortcut}</Kbd>}
+      </TooltipContent>
+    </Tooltip>
   );
 }
 
@@ -281,20 +318,19 @@ function formatReceived(iso: string): string {
   if (Number.isNaN(d.getTime())) return "";
   const now = new Date();
   const sameDay = d.toDateString() === now.toDateString();
-  if (sameDay)
-    return d.toLocaleTimeString(undefined, {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: false,
-    });
+  if (sameDay) {
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `${hh}:${mm}`;
+  }
+  const months = [
+    "Jan","Feb","Mar","Apr","May","Jun",
+    "Jul","Aug","Sep","Oct","Nov","Dec",
+  ];
+  const mon = months[d.getMonth()];
+  const day = d.getDate();
   const sameYear = d.getFullYear() === now.getFullYear();
-  return sameYear
-    ? d.toLocaleDateString(undefined, { month: "short", day: "numeric" })
-    : d.toLocaleDateString(undefined, {
-        month: "short",
-        day: "numeric",
-        year: "numeric",
-      });
+  return sameYear ? `${mon} ${day}` : `${mon} ${day}, ${d.getFullYear()}`;
 }
 
 // ─── Sidebar ────────────────────────────────────────────────────────────────
@@ -427,6 +463,7 @@ function MailTopNav({
   onClearCache,
   isRefreshing,
   isClearing,
+  onSearchOpen,
 }: {
   syncedState: SyncedState;
   profile: { emailAddress?: string } | null;
@@ -434,6 +471,7 @@ function MailTopNav({
   onClearCache: () => void;
   isRefreshing: boolean;
   isClearing: boolean;
+  onSearchOpen: () => void;
 }) {
   const email = profile?.emailAddress ?? "";
   const displayName = email.split("@")[0] ?? "Account";
@@ -475,6 +513,11 @@ function MailTopNav({
         <input
           className="border-border bg-muted text-foreground placeholder:text-muted-foreground h-8 w-full rounded-none border px-3 pr-14 pl-8 text-xs outline-none"
           placeholder="Search mail, events, people, or ask AI..."
+          onFocus={(e) => {
+            e.target.blur();
+            onSearchOpen();
+          }}
+          readOnly
         />
         <span className="absolute top-1/2 right-2 -translate-y-1/2">
           <Kbd className="text-[0.625rem]">Cmd K</Kbd>
@@ -552,6 +595,8 @@ function MailList({
   error,
   isInitialLoading,
   labelName,
+  searchQuery,
+  onClearSearch,
 }: {
   items: MailListItem[];
   selectedId: string | null;
@@ -564,6 +609,8 @@ function MailList({
   error: string | null;
   isInitialLoading: boolean;
   labelName: string;
+  searchQuery?: string;
+  onClearSearch?: () => void;
 }) {
   if (isInitialLoading) {
     return (
@@ -594,11 +641,30 @@ function MailList({
     return (
       <div className="border-border bg-card flex min-w-0 flex-col border-r">
         <div className="border-border flex h-11 shrink-0 items-center gap-2 border-b px-4">
-          <span className="text-sm font-semibold">{labelName}</span>
+          {searchQuery ? (
+            <div className="flex items-center gap-2">
+              <svg className="text-muted-foreground size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.35-4.35" />
+              </svg>
+              <span className="text-sm font-semibold">{searchQuery}</span>
+              <button
+                type="button"
+                onClick={onClearSearch}
+                className="text-muted-foreground hover:text-foreground ml-1 inline-flex size-4 items-center justify-center rounded-full hover:bg-muted"
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M18 6L6 18M6 6l12 12" />
+                </svg>
+              </button>
+            </div>
+          ) : (
+            <span className="text-sm font-semibold">{labelName}</span>
+          )}
         </div>
         <div className="flex-1 overflow-y-auto">
           <div className="text-muted-foreground flex h-full items-center justify-center p-6 text-center text-xs">
-            <p>No mail in this folder.</p>
+            <p>{searchQuery ? "No results found." : "No mail in this folder."}</p>
           </div>
         </div>
       </div>
@@ -608,7 +674,26 @@ function MailList({
   return (
     <div className="border-border bg-card flex min-w-0 flex-col border-r">
       <div className="border-border flex h-11 shrink-0 items-center gap-2 border-b px-4">
-        <span className="text-sm font-semibold">{labelName}</span>
+        {searchQuery ? (
+          <div className="flex items-center gap-2">
+            <svg className="text-muted-foreground size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+            <span className="text-sm font-semibold">{searchQuery}</span>
+            <button
+              type="button"
+              onClick={onClearSearch}
+              className="text-muted-foreground hover:text-foreground ml-1 inline-flex size-4 items-center justify-center rounded-full hover:bg-muted"
+            >
+              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M18 6L6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+        ) : (
+          <span className="text-sm font-semibold">{labelName}</span>
+        )}
         <button
           type="button"
           aria-label="Filter"
@@ -623,6 +708,7 @@ function MailList({
       <div className="flex-1 overflow-y-auto">
         {items.map((item) => {
           const isSelected = selectedId === item.id;
+          const isRead = !item.unread || isReadLocally(item.id);
           return (
             <button
               key={item.id}
@@ -634,7 +720,7 @@ function MailList({
               aria-current={isSelected ? "true" : undefined}
               className={cn(
                 "border-border hover:bg-accent block w-full border-b px-4 py-3 text-left transition",
-                item.unread ? "" : "bg-muted",
+                isRead ? "bg-muted" : "",
                 isSelected && "bg-accent",
               )}
             >
@@ -642,7 +728,7 @@ function MailList({
                 <span
                   className={cn(
                     "size-1.5 shrink-0 rounded-full",
-                    item.unread ? "bg-primary" : "bg-muted-foreground",
+                    isRead ? "bg-muted-foreground" : "bg-primary",
                   )}
                 />
                 <span className="truncate text-sm font-semibold">
@@ -802,53 +888,73 @@ function MailViewer({
 
   return (
     <main className="bg-background flex min-w-0 flex-col overflow-hidden">
-      <div className="border-border bg-card flex h-12 shrink-0 items-center gap-1 border-b px-3">
-        <MailToolbarButton>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <div className="border-border bg-card flex h-12 shrink-0 items-center gap-0.5 border-b px-2">
+        <MailToolbarButton label="Reply" shortcut="R">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="9 14 4 9 9 4" />
             <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
           </svg>
-          Reply
         </MailToolbarButton>
-        <div className="bg-border my-1 h-6 w-px" />
-        <MailToolbarButton>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <MailToolbarButton label="Reply All" shortcut="A">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polyline points="9 14 4 9 9 4" />
+            <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
+            <polyline points="15 14 11 9 15 4" />
+            <path d="M22 20v-7a4 4 0 0 0-4-4H8" />
+          </svg>
+        </MailToolbarButton>
+        <MailToolbarButton label="Forward" shortcut="F">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polyline points="15 14 19 9 15 4" />
+            <path d="M4 20v-7a4 4 0 0 1 4-4h12" />
+          </svg>
+        </MailToolbarButton>
+        <div className="bg-border mx-1 h-5 w-px" />
+        <MailToolbarButton label="Archive" shortcut="E">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="21 8 21 21 3 21 3 8" />
             <rect x="1" y="3" width="22" height="5" />
             <line x1="10" y1="12" x2="14" y2="12" />
           </svg>
-          Archive
         </MailToolbarButton>
-        <MailToolbarButton>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <MailToolbarButton label="Delete" shortcut="#">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polyline points="3 6 5 6 21 6" />
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+          </svg>
+        </MailToolbarButton>
+        <MailToolbarButton label="Mark Unread" shortcut="U">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="12" cy="12" r="10" />
             <line x1="12" y1="8" x2="12" y2="12" />
             <line x1="12" y1="16" x2="12.01" y2="16" />
           </svg>
-          Mark unread
         </MailToolbarButton>
-        <MailToolbarButton>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <MailToolbarButton label="Star" shortcut="S">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 1.01 12 2" />
+          </svg>
+        </MailToolbarButton>
+        <div className="bg-border mx-1 h-5 w-px" />
+        <MailToolbarButton label="Label" shortcut="L">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" />
             <line x1="7" y1="7" x2="7.01" y2="7" />
           </svg>
-          Label
         </MailToolbarButton>
-        <MailToolbarButton>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <MailToolbarButton label="Create Event">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
             <line x1="16" y1="2" x2="16" y2="6" />
             <line x1="8" y1="2" x2="8" y2="6" />
             <line x1="3" y1="10" x2="21" y2="10" />
           </svg>
-          Create event
         </MailToolbarButton>
-        <div className="bg-border my-1 h-6 w-px" />
-        <MailToolbarButton>
-          <svg className="text-primary" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <div className="bg-border mx-1 h-5 w-px" />
+        <MailToolbarButton label="Ask AI" shortcut="?">
+          <svg className="text-primary" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
           </svg>
-          Ask AI
         </MailToolbarButton>
         {message || messageLoading || messageError ? (
           <Button
@@ -856,10 +962,10 @@ function MailViewer({
             variant="ghost"
             size="icon-xs"
             onClick={onCloseMessage}
-            className="ml-auto"
+            className="ml-auto h-8 w-8"
             aria-label="Close message"
           >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <line x1="18" y1="6" x2="6" y2="18" />
               <line x1="6" y1="6" x2="18" y2="18" />
             </svg>
@@ -1029,7 +1135,16 @@ export function MailInterface({
   const activeLabel = searchParams.get("label") ?? initialLabel ?? "INBOX";
   const labelDef = LABEL_DEFS.find((l) => l.id === activeLabel);
   const labelName = labelDef?.name ?? activeLabel;
-  const labelIds = getLabelIdsForView(activeLabel);
+
+  // ─── Local UI state ────────────────────────────────────────────────────
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState<string>("");
+  const [searchInput, setSearchInput] = useState<string>("");
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  const gmailParams = searchQuery
+    ? { query: searchQuery }
+    : getGmailParamsForView(activeLabel);
 
   // ─── TanStack Query hooks ──────────────────────────────────────────────
   const [pageIndex, setPageIndex] = useState(0);
@@ -1038,11 +1153,18 @@ export function MailInterface({
 
   const currentPageToken = pageTokens[pageIndex];
 
+  // Reset pagination when search query or label changes
+  useEffect(() => {
+    setPageIndex(0);
+    setPageTokens([undefined]);
+  }, [searchQuery, activeLabel]);
+
   const threadsQuery = useMailThreads({
     page: pageIndex,
     pageSize: 25,
     token: currentPageToken,
-    labelIds,
+    labelIds: gmailParams.labelIds,
+    q: gmailParams.query,
     initialData: initial.gmailConnected ? initial.list : undefined,
   });
 
@@ -1057,10 +1179,26 @@ export function MailInterface({
   const refreshMutation = useRefreshInbox();
   const clearCacheMutation = useClearMailCache();
 
-  // ─── Local UI state ────────────────────────────────────────────────────
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-
   const messageQuery = useMailMessage(selectedId);
+
+  // ─── Ctrl+K to open search ────────────────────────────────────────────
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        setSearchOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+
+  // Reset search input when dialog opens
+  useEffect(() => {
+    if (searchOpen) {
+      setSearchInput(searchQuery);
+    }
+  }, [searchOpen, searchQuery]);
 
   // ─── Derived state ─────────────────────────────────────────────────────
   const items: MailListItem[] = (() => {
@@ -1096,9 +1234,23 @@ export function MailInterface({
     setSelectedId(null);
   }, [activeLabel]);
 
+  // ─── Auto-store next page tokens from query results ───────────────────
+  useEffect(() => {
+    const token = threadsQuery.data?.nextPageToken;
+    if (token) {
+      setPageTokens((prev) => {
+        if (prev[pageIndex + 1] === token) return prev;
+        const next = [...prev];
+        next[pageIndex + 1] = token;
+        return next;
+      });
+    }
+  }, [threadsQuery.data?.nextPageToken, pageIndex]);
+
   // ─── Callbacks ─────────────────────────────────────────────────────────
   const onSelect = useCallback((id: string) => {
     setSelectedId(id);
+    markAsReadLocally(id);
   }, []);
 
   const onOpen = useCallback((id: string) => {
@@ -1106,40 +1258,12 @@ export function MailInterface({
   }, []);
 
   const onPageChange = useCallback(
-    async (newPage: number) => {
+    (newPage: number) => {
       if (newPage === pageIndex) return;
-
-      if (newPage > pageIndex) {
-        // Going forward: check if we have more pages
-        const lastToken = pageTokens[pageIndex] ?? threadsQuery.data?.nextPageToken;
-        if (!lastToken && pageIndex > 0) return;
-
-        setPageError(null);
-        try {
-          const params = new URLSearchParams({
-            page: String(newPage),
-            pageSize: "25",
-          });
-          if (lastToken) params.set("token", lastToken);
-          if (labelIds?.length) params.set("labelIds", labelIds.join(","));
-
-          const res = await fetch(`/api/mail/threads?${params.toString()}`, { cache: "no-store" });
-          if (!res.ok) throw new Error(`Failed to load page (${res.status})`);
-          const data = await res.json();
-
-          const newTokens = [...pageTokens];
-          newTokens[newPage] = data.nextPageToken ?? undefined;
-          setPageTokens(newTokens);
-          setPageIndex(newPage);
-        } catch (err) {
-          setPageError(err instanceof Error ? err.message : "Failed to load page");
-        }
-      } else {
-        // Going back: data should be in TanStack Query cache
-        setPageIndex(newPage);
-      }
+      setPageError(null);
+      setPageIndex(newPage);
     },
-    [pageIndex, pageTokens, threadsQuery.data?.nextPageToken, labelIds],
+    [pageIndex],
   );
 
   const onClose = useCallback(() => {
@@ -1220,6 +1344,7 @@ export function MailInterface({
         onClearCache={onClearCache}
         isRefreshing={refreshMutation.isPending}
         isClearing={clearCacheMutation.isPending}
+        onSearchOpen={() => setSearchOpen(true)}
       />
       <ResizablePanelGroup className="min-h-0 flex-1">
         <ResizablePanel defaultSize={16} minSize={12}>
@@ -1245,6 +1370,11 @@ export function MailInterface({
               error={pageError}
               isInitialLoading={threadsQuery.isLoading}
               labelName={labelName}
+              searchQuery={searchQuery || undefined}
+              onClearSearch={() => {
+                setSearchQuery("");
+                setSearchInput("");
+              }}
             />
           </div>
         </ResizablePanel>
@@ -1263,6 +1393,73 @@ export function MailInterface({
           />
         </ResizablePanel>
       </ResizablePanelGroup>
+
+      {/* Search dialog */}
+      <CommandDialog open={searchOpen} onOpenChange={setSearchOpen}>
+        <CommandInput
+          placeholder="Search mail... (supports Gmail syntax: from:, subject:, is:unread, has:attachment)"
+          value={searchInput}
+          onValueChange={setSearchInput}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && searchInput.trim()) {
+              setSearchQuery(searchInput.trim());
+              setSearchOpen(false);
+            }
+            if (e.key === "Escape") {
+              setSearchOpen(false);
+              if (searchQuery) {
+                setSearchQuery("");
+                setSearchInput("");
+              }
+            }
+          }}
+        />
+        <CommandList>
+          <CommandEmpty>
+            {searchInput
+              ? "Press Enter to search"
+              : "Type a search query (e.g. from:alice is:unread has:attachment)"}
+          </CommandEmpty>
+          <CommandGroup heading="Quick filters">
+            <CommandItem
+              onSelect={() => {
+                setSearchQuery("is:unread");
+                setSearchInput("is:unread");
+                setSearchOpen(false);
+              }}
+            >
+              Unread emails
+            </CommandItem>
+            <CommandItem
+              onSelect={() => {
+                setSearchQuery("has:attachment");
+                setSearchInput("has:attachment");
+                setSearchOpen(false);
+              }}
+            >
+              With attachments
+            </CommandItem>
+            <CommandItem
+              onSelect={() => {
+                setSearchQuery("is:starred");
+                setSearchInput("is:starred");
+                setSearchOpen(false);
+              }}
+            >
+              Starred emails
+            </CommandItem>
+            <CommandItem
+              onSelect={() => {
+                setSearchQuery("-label:inbox");
+                setSearchInput("-label:inbox");
+                setSearchOpen(false);
+              }}
+            >
+              Archived emails
+            </CommandItem>
+          </CommandGroup>
+        </CommandList>
+      </CommandDialog>
     </div>
   );
 }

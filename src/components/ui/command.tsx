@@ -57,7 +57,7 @@ function CommandDialog({
         className={cn("top-1/3 translate-y-0 overflow-hidden p-0", className)}
         showCloseButton={showCloseButton}
       >
-        {children}
+        <Command shouldFilter={false}>{children}</Command>
       </DialogContent>
     </Dialog>
   )

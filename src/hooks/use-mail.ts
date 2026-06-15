@@ -12,6 +12,7 @@ async function fetchMailThreads(opts: {
   token?: string;
   refresh?: boolean;
   labelIds?: string[];
+  q?: string;
 }): Promise<MailListResponse> {
   const params = new URLSearchParams();
   params.set("page", String(opts.page ?? 0));
@@ -19,6 +20,7 @@ async function fetchMailThreads(opts: {
   if (opts.token) params.set("token", opts.token);
   if (opts.refresh) params.set("refresh", "true");
   if (opts.labelIds?.length) params.set("labelIds", opts.labelIds.join(","));
+  if (opts.q) params.set("q", opts.q);
 
   const res = await fetch(`/api/mail/threads?${params.toString()}`, {
     cache: "no-store",
@@ -102,7 +104,7 @@ async function clearMailCache(): Promise<{ deletedMessages: number; deletedLabel
 
 export const mailKeys = {
   all: ["mail"] as const,
-  threads: (opts?: { page?: number; pageSize?: number; labelIds?: string[] }) =>
+  threads: (opts?: { page?: number; pageSize?: number; token?: string; labelIds?: string[]; q?: string }) =>
     [...mailKeys.all, "threads", opts] as const,
   message: (id: string) => [...mailKeys.all, "message", id] as const,
   labels: () => [...mailKeys.all, "labels"] as const,
@@ -117,13 +119,15 @@ export function useMailThreads(opts: {
   token?: string;
   refresh?: boolean;
   labelIds?: string[];
+  q?: string;
   initialData?: MailListResponse;
 }) {
   return useQuery({
-    queryKey: mailKeys.threads({ page: opts.page, pageSize: opts.pageSize, labelIds: opts.labelIds }),
+    queryKey: mailKeys.threads({ page: opts.page, pageSize: opts.pageSize, token: opts.token, labelIds: opts.labelIds, q: opts.q }),
     queryFn: () => fetchMailThreads(opts),
     initialData: opts.initialData,
     placeholderData: (prev) => prev,
+    staleTime: 30_000,
   });
 }
 
@@ -171,7 +175,7 @@ export function useClearMailCache() {
   return useMutation({
     mutationFn: clearMailCache,
     onSuccess: () => {
-      queryClient.setQueryData(mailKeys.threads({ page: 0, pageSize: 50 }), {
+      queryClient.setQueryData(mailKeys.threads({ page: 0, pageSize: 50, token: undefined, q: undefined }), {
         items: [],
         nextPageToken: null,
         source: "cache" as const,

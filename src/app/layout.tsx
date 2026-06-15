@@ -3,6 +3,7 @@ import "@/styles/globals.css";
 import { type Metadata } from "next";
 import { Geist, Inter } from "next/font/google";
 import { ThemeProvider } from "next-themes";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { QueryProvider } from "@/lib/query-provider";
 import Script from "next/script";
@@ -38,7 +39,9 @@ export default function RootLayout({
         <Script id="theme-init" strategy="beforeInteractive" dangerouslySetInnerHTML={{ __html: themeScript }} />
         <ThemeProvider attribute="class" defaultTheme="dark" enableSystem>
           <QueryProvider>
-            {children}
+            <TooltipProvider>
+              {children}
+            </TooltipProvider>
           </QueryProvider>
         </ThemeProvider>
       </body>
