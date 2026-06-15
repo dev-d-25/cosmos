@@ -10,9 +10,9 @@ export const MailAttachmentSchema = z.object({
 export const MailListItemSchema = z.object({
   id: z.string(),
   threadId: z.string(),
-  subject: z.string(),
-  from: z.string(),
-  snippet: z.string(),
+  subject: z.string().optional(),
+  from: z.string().optional(),
+  snippet: z.string().optional(),
   receivedAt: z.string(),
   unread: z.boolean(),
   labelIds: z.array(z.string()),
@@ -20,33 +20,33 @@ export const MailListItemSchema = z.object({
 
 export const MailMessageSchema = z.object({
   id: z.string(),
-  threadId: z.string(),
-  subject: z.string(),
-  from: z.string(),
-  to: z.string(),
-  cc: z.string(),
-  date: z.string().nullable(),
-  snippet: z.string(),
-  bodyHtml: z.string(),
-  bodyText: z.string(),
-  attachments: z.array(MailAttachmentSchema),
+  threadId: z.string().optional().default(""),
+  subject: z.string().optional().default(""),
+  from: z.string().optional().default(""),
+  to: z.string().optional().default(""),
+  cc: z.string().optional().default(""),
+  date: z.string().nullable().optional().default(null),
+  snippet: z.string().optional().default(""),
+  bodyHtml: z.string().optional().default(""),
+  bodyText: z.string().optional().default(""),
+  attachments: z.array(MailAttachmentSchema).optional().default([]),
 });
 
 export const MailLabelSchema = z.object({
   id: z.string(),
-  name: z.string(),
-  type: z.enum(["system", "user"]),
-  messagesTotal: z.number(),
-  messagesUnread: z.number(),
-  color: z.string().nullable(),
+  name: z.string().optional().default(""),
+  type: z.enum(["system", "user"]).optional().default("system"),
+  messagesTotal: z.number().optional().default(0),
+  messagesUnread: z.number().optional().default(0),
+  color: z.string().nullable().optional().default(null),
 });
 
 export const MailProfileSchema = z.object({
-  emailAddress: z.string(),
-  messagesTotal: z.number(),
-  threadsTotal: z.number(),
-  historyId: z.string(),
-  cachedAt: z.string(),
+  emailAddress: z.string().optional().default(""),
+  messagesTotal: z.number().optional().default(0),
+  threadsTotal: z.number().optional().default(0),
+  historyId: z.string().optional().default(""),
+  cachedAt: z.string().optional().default(""),
 });
 
 export const MailListResponseSchema = z.object({
@@ -56,7 +56,9 @@ export const MailListResponseSchema = z.object({
 });
 
 export const MailThreadsQuerySchema = z.object({
-  limit: z.coerce.number().int().positive().default(50),
+  page: z.coerce.number().int().min(0).default(0),
+  pageSize: z.coerce.number().int().positive().max(100).default(50),
+  token: z.string().optional(),
   refresh: z.enum(["true", "false"]).default("false"),
 });
 

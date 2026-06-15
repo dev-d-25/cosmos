@@ -1,15 +1,22 @@
 "use client";
 
 import Link from "next/link";
-import type { ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { useTheme } from "next-themes";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 
 import { SignOutButton } from "@/components/auth-buttons";
 import { ConnectButton } from "@/components/connect-button";
+import { EmailIframe } from "@/components/email-iframe";
 import { Badge } from "@/components/ui/badge";
 import { Button, buttonVariants } from "@/components/ui/button";
-import { cn } from "@/lib/utils";
+import { cn, decodeHtmlEntities, linkifyText } from "@/lib/utils";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -26,7 +33,186 @@ import {
 } from "@/components/ui/resizable";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { ThemeToggle } from "@/components/theme-toggle";
-import type { MailListItem, MailPageData } from "@/server/mail/types";
+import type {
+  MailLabel,
+  MailListItem,
+  MailMessage,
+  MailPageData,
+  MailProfile,
+} from "@/server/mail/types";
+import {
+  useMailThreads,
+  useMailMessage,
+  useMailLabels,
+  useMailProfile,
+  useRefreshInbox,
+  useClearMailCache,
+} from "@/hooks/use-mail";
+
+// ─── Label definitions ──────────────────────────────────────────────────────
+
+interface LabelDef {
+  id: string;
+  name: string;
+  icon: ReactNode;
+  gmailLabel?: string;
+}
+
+const LABEL_DEFS: LabelDef[] = [
+  {
+    id: "INBOX",
+    name: "Inbox",
+    icon: (
+      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
+        <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+      </svg>
+    ),
+    gmailLabel: "INBOX",
+  },
+  {
+    id: "STARRED",
+    name: "Starred",
+    icon: (
+      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 1.01 12 2" />
+      </svg>
+    ),
+    gmailLabel: "STARRED",
+  },
+  {
+    id: "SENT",
+    name: "Sent",
+    icon: (
+      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <line x1="22" y1="2" x2="11" y2="13" />
+        <polygon points="22 2 15 22 11 13 2 9 22 2" />
+      </svg>
+    ),
+    gmailLabel: "SENT",
+  },
+  {
+    id: "DRAFT",
+    name: "Drafts",
+    icon: (
+      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        <polyline points="14 2 14 8 20 2" />
+      </svg>
+    ),
+    gmailLabel: "DRAFT",
+  },
+  {
+    id: "ARCHIVE",
+    name: "Archive",
+    icon: (
+      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <polyline points="21 8 21 21 3 21 3 8" />
+        <rect x="1" y="3" width="22" height="5" />
+        <line x1="10" y1="12" x2="14" y2="12" />
+      </svg>
+    ),
+  },
+  {
+    id: "SPAM",
+    name: "Spam",
+    icon: (
+      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <circle cx="12" cy="12" r="10" />
+        <line x1="12" y1="8" x2="12" y2="12" />
+        <line x1="12" y1="16" x2="12.01" y2="16" />
+      </svg>
+    ),
+    gmailLabel: "SPAM",
+  },
+  { id: "divider-1", name: "", icon: null },
+  {
+    id: "IMPORTANT",
+    name: "Important",
+    icon: (
+      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M13 2L3 14h9l-1 10 10-12h-9l1-10z" />
+      </svg>
+    ),
+    gmailLabel: "IMPORTANT",
+  },
+  {
+    id: "UNREAD",
+    name: "Unread",
+    icon: (
+      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <rect x="2" y="4" width="20" height="16" rx="2" />
+        <path d="M22 7l-10 7L2 7" />
+      </svg>
+    ),
+    gmailLabel: "UNREAD",
+  },
+  { id: "divider-2", name: "", icon: null },
+  {
+    id: "CATEGORY_PERSONAL",
+    name: "Personal",
+    icon: (
+      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+        <circle cx="12" cy="7" r="4" />
+      </svg>
+    ),
+    gmailLabel: "CATEGORY_PERSONAL",
+  },
+  {
+    id: "CATEGORY_SOCIAL",
+    name: "Social",
+    icon: (
+      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+        <circle cx="9" cy="7" r="4" />
+        <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+        <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+      </svg>
+    ),
+    gmailLabel: "CATEGORY_SOCIAL",
+  },
+  {
+    id: "CATEGORY_UPDATES",
+    name: "Updates",
+    icon: (
+      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
+        <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+      </svg>
+    ),
+    gmailLabel: "CATEGORY_UPDATES",
+  },
+  {
+    id: "CATEGORY_PROMOTIONS",
+    name: "Promotions",
+    icon: (
+      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" />
+        <line x1="7" y1="7" x2="7.01" y2="7" />
+      </svg>
+    ),
+    gmailLabel: "CATEGORY_PROMOTIONS",
+  },
+  {
+    id: "CATEGORY_FORUMS",
+    name: "Forums",
+    icon: (
+      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+      </svg>
+    ),
+    gmailLabel: "CATEGORY_FORUMS",
+  },
+];
+
+function getLabelIdsForView(view: string): string[] | undefined {
+  const def = LABEL_DEFS.find((l) => l.id === view);
+  if (!def?.gmailLabel) return undefined;
+  return [def.gmailLabel];
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 function MailToolbarButton({ children }: { children: ReactNode }) {
   return (
@@ -44,14 +230,16 @@ function SidebarItem({
   active = false,
   badge,
   children,
+  href,
 }: {
   active?: boolean;
   badge?: ReactNode;
   children: ReactNode;
+  href?: string;
 }) {
   return (
     <Link
-      href="/mail"
+      href={href ?? "/mail"}
       className={[
         "text-sidebar-foreground hover:bg-sidebar-accent flex items-center gap-2.5 px-4 py-1.5 text-xs font-medium transition",
         active ? "bg-sidebar-accent text-sidebar-primary" : "",
@@ -109,238 +297,111 @@ function formatReceived(iso: string): string {
       });
 }
 
-function MailSidebar({ gmailConnected }: { gmailConnected: boolean }) {
+// ─── Sidebar ────────────────────────────────────────────────────────────────
+
+function MailSidebar({
+  labels,
+  activeLabel,
+  profile,
+}: {
+  labels: MailLabel[];
+  activeLabel: string;
+  profile: MailProfile | null;
+}) {
+  const email = profile?.emailAddress ?? "";
+  const labelMap = useMemo(() => {
+    const m = new Map<string, MailLabel>();
+    for (const l of labels) m.set(l.id, l);
+    return m;
+  }, [labels]);
+
   return (
-    <aside className="border-sidebar-border bg-sidebar flex h-full flex-col gap-1 overflow-y-auto border-r p-0">
-      <SidebarItem active badge="12">
-        <svg
-          className="shrink-0 opacity-70"
-          width="14"
-          height="14"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
-          <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
-        </svg>
-        Inbox
-      </SidebarItem>
-      <SidebarItem badge="8">
-        <svg
-          className="shrink-0 opacity-70"
-          width="14"
-          height="14"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 1.01 12 2" />
-        </svg>
-        Priority
-      </SidebarItem>
-      <SidebarItem badge="3">
-        <svg
-          className="shrink-0 opacity-70"
-          width="14"
-          height="14"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <polyline points="9 11 12 14 22 4" />
-          <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-        </svg>
-        Needs Reply
-      </SidebarItem>
-      <SidebarItem>
-        <svg
-          className="shrink-0 opacity-70"
-          width="14"
-          height="14"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 1.01 12 2" />
-        </svg>
-        Starred
-      </SidebarItem>
-      <SidebarItem>
-        <svg
-          className="shrink-0 opacity-70"
-          width="14"
-          height="14"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <line x1="22" y1="2" x2="11" y2="13" />
-          <polygon points="22 2 15 22 11 13 2 9 22 2" />
-        </svg>
-        Sent
-      </SidebarItem>
-      <SidebarItem badge="2">
-        <svg
-          className="shrink-0 opacity-70"
-          width="14"
-          height="14"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-          <polyline points="14 2 14 8 20 2" />
-        </svg>
-        Drafts
-      </SidebarItem>
-      <SidebarItem>Archive</SidebarItem>
-      <SidebarItem>Spam</SidebarItem>
-
-      <div className="bg-border my-2 h-px" />
-
-      <div className="text-muted-foreground flex items-center justify-between px-4 pt-4 pb-1 text-[0.55rem] font-bold tracking-[0.16em] uppercase">
-        Labels
-        <svg
-          width="10"
-          height="10"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2.5"
-        >
-          <line x1="12" y1="5" x2="12" y2="19" />
-          <line x1="5" y1="12" x2="19" y2="12" />
-        </svg>
-      </div>
-      <SidebarItem badge="6">
-        <span className="bg-primary size-2" />
-        Work
-      </SidebarItem>
-      <SidebarItem badge="4">
-        <span className="bg-primary size-2" />
-        Personal
-      </SidebarItem>
-      <SidebarItem badge="2">
-        <span className="bg-primary size-2" />
-        Finance
-      </SidebarItem>
-      <SidebarItem badge="1">
-        <span className="bg-primary size-2" />
-        Travel
-      </SidebarItem>
-
-      <div className="bg-border my-2 h-px" />
-
-      <div className="px-4 pt-4 pb-1">
-        <div className="text-muted-foreground mb-2 flex items-center justify-between text-[0.55rem] font-bold tracking-[0.16em] uppercase">
-          Today
-          <svg
-            width="10"
-            height="10"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
-            <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-            <line x1="16" y1="2" x2="16" y2="6" />
-            <line x1="8" y1="2" x2="8" y2="6" />
-            <line x1="3" y1="10" x2="21" y2="10" />
-          </svg>
-        </div>
-        <div className="flex gap-2.5 py-1">
-          <span className="text-muted-foreground min-w-9 text-[0.625rem]">
-            9:00
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-xs font-medium">Standup</p>
-            <p className="text-muted-foreground truncate text-[0.625rem]">
-              30m, Google Meet
-            </p>
-          </div>
-          <span className="bg-primary mt-1 size-1.5 shrink-0 rounded-full" />
-        </div>
-        <div className="flex gap-2.5 py-1">
-          <span className="text-muted-foreground min-w-9 text-[0.625rem]">
-            14:30
-          </span>
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-xs font-medium">Product Review</p>
-            <p className="text-muted-foreground truncate text-[0.625rem]">
-              1h, Room 3 / Zoom
-            </p>
-          </div>
-          <span className="bg-primary mt-1 size-1.5 shrink-0 rounded-full" />
-        </div>
-      </div>
-
-      <div className="bg-border my-2 h-px" />
-
-      <div className="px-4 pt-3 pb-4">
-        <p className="text-muted-foreground mb-2 text-[0.55rem] font-bold tracking-[0.16em] uppercase">
-          Connected Accounts
-        </p>
-        <div className="text-muted-foreground mb-1 flex items-center gap-2 text-xs">
-          <span className="bg-destructive text-primary-foreground flex size-4 items-center justify-center rounded-sm text-[0.55rem] font-black">
+    <aside className="border-sidebar-border bg-sidebar flex h-full flex-col gap-0 overflow-y-auto border-r p-0">
+      <div className="px-4 py-3">
+        <div className="flex items-center gap-2">
+          <span className="bg-destructive text-primary-foreground flex size-5 items-center justify-center text-[0.625rem] font-black">
             G
           </span>
-          Gmail
-          <span className="ml-auto flex items-center gap-1 text-[0.625rem]">
-            <span
-              className={[
-                "size-1.5 rounded-full",
-                gmailConnected ? "bg-primary" : "bg-muted-foreground",
-              ].join(" ")}
-            />
-            {gmailConnected ? "Connected" : "Missing"}
-          </span>
-        </div>
-        <div className="text-muted-foreground flex items-center gap-2 text-xs">
-          <span className="bg-primary text-primary-foreground flex size-4 items-center justify-center rounded-sm text-[0.55rem] font-black">
-            C
-          </span>
-          Google Calendar
-          <span className="ml-auto flex items-center gap-1 text-[0.625rem]">
-            <span className="bg-muted-foreground size-1.5 rounded-full" />
-            Coming soon
-          </span>
+          <span className="truncate text-xs font-semibold">{email || "Gmail"}</span>
         </div>
       </div>
+
+      <div className="bg-border mx-4 mb-2 h-px" />
+
+      {LABEL_DEFS.map((def) => {
+        if (def.id.startsWith("divider-")) {
+          return <div key={def.id} className="bg-border mx-4 my-2 h-px" />;
+        }
+        const label = def.gmailLabel ? labelMap.get(def.gmailLabel) : undefined;
+        const unread = label?.messagesUnread;
+        return (
+          <SidebarItem
+            key={def.id}
+            active={activeLabel === def.id}
+            href={`/mail?label=${def.id}`}
+            badge={unread && unread > 0 ? unread.toString() : undefined}
+          >
+            {def.icon}
+            {def.name}
+          </SidebarItem>
+        );
+      })}
+
+      {(() => {
+        const userLabels = labels.filter((l) => l.type === "user");
+        if (userLabels.length === 0) return null;
+        return (
+          <>
+            <div className="bg-border mx-4 my-2 h-px" />
+            <div className="text-muted-foreground flex items-center justify-between px-4 pt-2 pb-1 text-[0.55rem] font-bold tracking-[0.16em] uppercase">
+              Labels
+            </div>
+            {userLabels.map((label) => (
+              <SidebarItem
+                key={label.id}
+                active={activeLabel === label.id}
+                href={`/mail?label=${label.id}`}
+                badge={label.messagesUnread > 0 ? label.messagesUnread.toString() : undefined}
+              >
+                <span className="bg-primary size-2" />
+                {label.name}
+              </SidebarItem>
+            ))}
+          </>
+        );
+      })()}
     </aside>
   );
 }
 
-function ProfileDropdown() {
+// ─── Profile Dropdown ───────────────────────────────────────────────────────
+
+function ProfileDropdown({ profile }: { profile: { emailAddress?: string; name?: string } | null }) {
+  const email = profile?.emailAddress ?? "";
+  const name = profile?.name ?? email.split("@")[0] ?? "User";
+  const initials = initialsOf(name);
+
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger>
-        <Button variant="ghost" size="icon" className="rounded-none">
-          <Avatar size="sm">
-            <AvatarFallback className="bg-muted text-muted-foreground text-xs font-semibold">
-              AM
-            </AvatarFallback>
-          </Avatar>
-        </Button>
+      <DropdownMenuTrigger render={<button type="button" />}>
+        <Avatar size="sm">
+          <AvatarFallback className="bg-muted text-muted-foreground text-xs font-semibold">
+            {initials}
+          </AvatarFallback>
+        </Avatar>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="min-w-56">
         <DropdownMenuLabel className="px-3">
           <div className="flex items-center gap-2 py-0.5">
             <Avatar size="sm" className="size-7">
               <AvatarFallback className="bg-muted text-[0.625rem] font-bold">
-                AM
+                {initialsOf(email)}
               </AvatarFallback>
             </Avatar>
             <div className="flex flex-col">
-              <span className="text-xs font-semibold">Alex Morgan</span>
+              <span className="text-xs font-semibold">{name}</span>
               <span className="text-muted-foreground text-[0.625rem]">
-                alex@personal-gmail.com
+                {email}
               </span>
             </div>
           </div>
@@ -355,58 +416,30 @@ function ProfileDropdown() {
   );
 }
 
-type SyncedState = "Not connected" | "No mail cached" | "Synced";
+// ─── Top Nav ────────────────────────────────────────────────────────────────
 
-function MailTopNav({ syncedState }: { syncedState: SyncedState }) {
-  const { theme, setTheme } = useTheme();
+type SyncedState = "Not connected" | "No mail cached" | "Synced" | "Loading...";
+
+function MailTopNav({
+  syncedState,
+  profile,
+  onRefresh,
+  onClearCache,
+  isRefreshing,
+  isClearing,
+}: {
+  syncedState: SyncedState;
+  profile: { emailAddress?: string } | null;
+  onRefresh: () => void;
+  onClearCache: () => void;
+  isRefreshing: boolean;
+  isClearing: boolean;
+}) {
+  const email = profile?.emailAddress ?? "";
+  const displayName = email.split("@")[0] ?? "Account";
 
   return (
     <nav className="border-border bg-card flex h-12 shrink-0 items-center gap-2 border-b px-4">
-      <DropdownMenu>
-        <DropdownMenuTrigger>
-          <button
-            type="button"
-            className="border-border bg-accent flex min-w-40 cursor-default items-center gap-2 border px-2.5 py-1 text-sm font-semibold"
-          >
-            <span className="bg-destructive text-primary-foreground flex size-4 items-center justify-center text-[0.625rem] font-black">
-              G
-            </span>
-            <span className="truncate">Personal Gmail</span>
-            <svg
-              className="ml-auto size-3 shrink-0 opacity-50"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-            >
-              <path d="M6 9l6 6 6-6" />
-            </svg>
-          </button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="min-w-60">
-          <DropdownMenuLabel className="px-3">
-            <div className="flex items-center gap-2 py-0.5">
-              <Avatar size="sm" className="size-7">
-                <AvatarFallback className="bg-muted text-[0.625rem] font-bold">
-                  AM
-                </AvatarFallback>
-              </Avatar>
-              <div className="flex flex-col">
-                <span className="text-xs font-semibold">Alex Morgan</span>
-                <span className="text-muted-foreground text-[0.625rem]">
-                  alex@personal-gmail.com
-                </span>
-              </div>
-            </div>
-          </DropdownMenuLabel>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem>Profile</DropdownMenuItem>
-          <DropdownMenuItem>Settings</DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuItem>Sign out</DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
-
       <div className="flex gap-0.5 text-xs font-medium">
         <Link
           href="/mail"
@@ -459,28 +492,43 @@ function MailTopNav({ syncedState }: { syncedState: SyncedState }) {
               syncedState === "Synced" ? "bg-primary" : "bg-muted-foreground",
             ].join(" ")}
           />
-          {syncedState}
+          {isRefreshing ? "Refreshing..." : syncedState}
         </Badge>
+
+        <div className="bg-border h-5 w-px" />
+
         <Button
           variant="ghost"
           size="icon"
-          aria-label="Notifications"
+          aria-label="Refresh inbox"
           className="size-8"
+          onClick={onRefresh}
+          disabled={isRefreshing}
+          title="Refresh inbox"
         >
-          <svg
-            width="14"
-            height="14"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
-            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
-            <path d="M13.73 21a2 2 0 0 1-3.46 0" />
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" />
           </svg>
         </Button>
 
-        <ProfileDropdown />
+        <Button
+          variant="ghost"
+          size="icon"
+          aria-label="Clear cache and re-sync"
+          className="size-8"
+          onClick={onClearCache}
+          disabled={isClearing}
+          title="Clear local cache and re-fetch from Gmail"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <polyline points="1 4 1 10 7 10" />
+            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
+          </svg>
+        </Button>
+
+        <div className="bg-border h-5 w-px" />
+
+        <ProfileDropdown profile={profile} />
 
         <ThemeToggle />
 
@@ -490,31 +538,67 @@ function MailTopNav({ syncedState }: { syncedState: SyncedState }) {
   );
 }
 
-function MailList({ items }: { items: MailListItem[] }) {
+// ─── Mail List ──────────────────────────────────────────────────────────────
+
+function MailList({
+  items,
+  selectedId,
+  onSelect,
+  onOpen,
+  page,
+  totalPages,
+  onPageChange,
+  loading,
+  error,
+  isInitialLoading,
+  labelName,
+}: {
+  items: MailListItem[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onOpen?: (id: string) => void;
+  page: number;
+  totalPages: number;
+  onPageChange: (page: number) => void;
+  loading: boolean;
+  error: string | null;
+  isInitialLoading: boolean;
+  labelName: string;
+}) {
+  if (isInitialLoading) {
+    return (
+      <div className="border-border bg-card flex min-w-0 flex-col border-r">
+        <div className="border-border flex h-11 shrink-0 items-center gap-2 border-b px-4">
+          <span className="text-sm font-semibold">{labelName}</span>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          <div className="flex flex-col gap-0">
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={i} className="border-border border-b px-4 py-3">
+                <div className="mb-1 flex items-center gap-2">
+                  <div className="bg-muted size-1.5 shrink-0 animate-pulse rounded-full" />
+                  <div className="bg-muted h-3 w-32 animate-pulse rounded" />
+                  <div className="bg-muted ml-auto h-2 w-10 animate-pulse rounded" />
+                </div>
+                <div className="bg-muted ml-3.5 mb-1 h-2.5 w-48 animate-pulse rounded" />
+                <div className="bg-muted ml-3.5 h-2 w-64 animate-pulse rounded" />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (items.length === 0) {
     return (
       <div className="border-border bg-card flex min-w-0 flex-col border-r">
         <div className="border-border flex h-11 shrink-0 items-center gap-2 border-b px-4">
-          <button
-            type="button"
-            className="flex items-center gap-1.5 text-sm font-semibold"
-          >
-            Priority First
-            <svg
-              width="11"
-              height="11"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.5"
-            >
-              <path d="M6 9l6 6 6-6" />
-            </svg>
-          </button>
+          <span className="text-sm font-semibold">{labelName}</span>
         </div>
         <div className="flex-1 overflow-y-auto">
           <div className="text-muted-foreground flex h-full items-center justify-center p-6 text-center text-xs">
-            <p>No mail in your inbox yet. Hit Refresh to sync.</p>
+            <p>No mail in this folder.</p>
           </div>
         </div>
       </div>
@@ -524,168 +608,162 @@ function MailList({ items }: { items: MailListItem[] }) {
   return (
     <div className="border-border bg-card flex min-w-0 flex-col border-r">
       <div className="border-border flex h-11 shrink-0 items-center gap-2 border-b px-4">
-        <button
-          type="button"
-          className="flex items-center gap-1.5 text-sm font-semibold"
-        >
-          Priority First
-          <svg
-            width="11"
-            height="11"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2.5"
-          >
-            <path d="M6 9l6 6 6-6" />
-          </svg>
-        </button>
+        <span className="text-sm font-semibold">{labelName}</span>
         <button
           type="button"
           aria-label="Filter"
           className="border-border text-muted-foreground hover:bg-accent hover:text-foreground ml-auto flex size-7 items-center justify-center border transition"
         >
-          <svg
-            width="12"
-            height="12"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
           </svg>
         </button>
       </div>
 
-      <div className="border-border bg-card flex h-9 shrink-0 border-b text-xs font-medium">
-        <button
-          type="button"
-          className="border-primary text-foreground border-b-2 px-3.5"
-        >
-          Important
-        </button>
-        <button
-          type="button"
-          className="text-muted-foreground hover:text-foreground px-3.5 transition"
-        >
-          Unread
-        </button>
-        <button
-          type="button"
-          className="text-muted-foreground hover:text-foreground px-3.5 transition"
-        >
-          Calendar
-        </button>
-        <button
-          type="button"
-          className="text-muted-foreground hover:text-foreground px-3.5 transition"
-        >
-          All
-        </button>
+      <div className="flex-1 overflow-y-auto">
+        {items.map((item) => {
+          const isSelected = selectedId === item.id;
+          return (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => onSelect(item.id)}
+              onDoubleClick={() => onOpen?.(item.id)}
+              data-message-id={item.id}
+              data-selected={isSelected ? "true" : "false"}
+              aria-current={isSelected ? "true" : undefined}
+              className={cn(
+                "border-border hover:bg-accent block w-full border-b px-4 py-3 text-left transition",
+                item.unread ? "" : "bg-muted",
+                isSelected && "bg-accent",
+              )}
+            >
+              <div className="mb-1 flex items-center gap-2">
+                <span
+                  className={cn(
+                    "size-1.5 shrink-0 rounded-full",
+                    item.unread ? "bg-primary" : "bg-muted-foreground",
+                  )}
+                />
+                <span className="truncate text-sm font-semibold">
+                  {decodeHtmlEntities(item.from) || "(unknown sender)"}
+                </span>
+                <span className="text-muted-foreground shrink-0 text-[0.625rem]">
+                  {formatReceived(item.receivedAt)}
+                </span>
+              </div>
+              <p className="truncate pl-3.5 text-xs font-medium">
+                {decodeHtmlEntities(item.subject) || "(no subject)"}
+              </p>
+              <p className="text-muted-foreground truncate pl-3.5 text-[0.625rem]">
+                {decodeHtmlEntities(item.snippet)}
+              </p>
+              {item.labelIds.length > 0 ? (
+                <div className="mt-1 flex flex-wrap gap-1 pl-3.5">
+                  {item.labelIds
+                    .filter(
+                      (l) =>
+                        ![
+                          "UNREAD",
+                          "IMPORTANT",
+                          "CATEGORY_PERSONAL",
+                          "CATEGORY_UPDATES",
+                        ].includes(l),
+                    )
+                    .slice(0, 3)
+                    .map((label) => (
+                      <MailTag key={label}>
+                        {label.replace(/^CATEGORY_/, "").replace(/^Label_/, "")}
+                      </MailTag>
+                    ))}
+                </div>
+              ) : null}
+            </button>
+          );
+        })}
       </div>
 
-      <div className="flex-1 overflow-y-auto">
-        {items.map((item) => (
-          <Link
-            key={item.id}
-            href="/mail"
-            className={[
-              "border-border hover:bg-accent block border-b px-4 py-3 transition",
-              item.unread ? "" : "bg-muted",
-            ].join(" ")}
+      {totalPages > 1 ? (
+        <div className="border-border flex items-center justify-between border-t px-4 py-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={page <= 0 || loading}
+            onClick={() => onPageChange(page - 1)}
           >
-            <div className="mb-1 flex items-center gap-2">
-              <span
-                className={[
-                  "size-1.5 shrink-0 rounded-full",
-                  item.unread ? "bg-primary" : "bg-muted-foreground",
-                ].join(" ")}
-              />
-              <span className="truncate text-sm font-semibold">
-                {item.from || "(unknown sender)"}
-              </span>
-              <span className="text-muted-foreground shrink-0 text-[0.625rem]">
-                {formatReceived(item.receivedAt)}
-              </span>
-            </div>
-            <p className="truncate pl-3.5 text-xs font-medium">
-              {item.subject || "(no subject)"}
-            </p>
-            <p className="text-muted-foreground truncate pl-3.5 text-[0.625rem]">
-              {item.snippet}
-            </p>
-            {item.labelIds.length > 0 ? (
-              <div className="mt-1 flex flex-wrap gap-1 pl-3.5">
-                {item.labelIds
-                  .filter(
-                    (l) =>
-                      ![
-                        "UNREAD",
-                        "IMPORTANT",
-                        "CATEGORY_PERSONAL",
-                        "CATEGORY_UPDATES",
-                      ].includes(l),
-                  )
-                  .slice(0, 3)
-                  .map((label) => (
-                    <MailTag key={label}>
-                      {label.replace(/^Label_/, "")}
-                    </MailTag>
-                  ))}
-              </div>
-            ) : null}
-          </Link>
-        ))}
-      </div>
+            Prev
+          </Button>
+          <div className="flex items-center gap-1">
+            {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
+              let pageNum: number;
+              if (totalPages <= 7) {
+                pageNum = i;
+              } else if (page < 3) {
+                pageNum = i;
+              } else if (page > totalPages - 4) {
+                pageNum = totalPages - 7 + i;
+              } else {
+                pageNum = page - 3 + i;
+              }
+              return (
+                <Button
+                  key={pageNum}
+                  type="button"
+                  variant={pageNum === page ? "default" : "ghost"}
+                  size="sm"
+                  className="size-8 p-0 text-xs"
+                  disabled={loading}
+                  onClick={() => onPageChange(pageNum)}
+                >
+                  {pageNum + 1}
+                </Button>
+              );
+            })}
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={page >= totalPages - 1 || loading}
+            onClick={() => onPageChange(page + 1)}
+          >
+            Next
+          </Button>
+        </div>
+      ) : null}
+
+      {error ? (
+        <div className="border-border border-t px-4 py-2">
+          <p className="text-destructive text-[0.625rem]">{error}</p>
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function AssistantActionCard({
-  children,
-  title,
-  description,
-}: {
-  children: ReactNode;
-  title: string;
-  description: string;
-}) {
-  return (
-    <Button
-      variant="ghost"
-      className="bg-muted hover:border-border hover:bg-accent mb-2 flex h-auto w-full items-center gap-3 rounded-none border border-transparent px-4 py-3 text-left"
-    >
-      <div className="border-primary/30 bg-accent text-primary flex size-8 shrink-0 items-center justify-center border">
-        {children}
-      </div>
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-semibold">{title}</p>
-        <p className="text-muted-foreground text-[0.625rem] leading-4">
-          {description}
-        </p>
-      </div>
-      <svg
-        className="text-muted-foreground shrink-0"
-        width="12"
-        height="12"
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-      >
-        <path d="M9 18l6-6-6-6" />
-      </svg>
-    </Button>
-  );
-}
+// ─── Mail Viewer ────────────────────────────────────────────────────────────
 
 function MailViewer({
   gmailConnected,
-  profile,
+  selectedListItem,
+  message,
+  messageSource,
+  messageLoading,
+  messageError,
+  onRetryMessage,
+  onCloseMessage,
+  labelName,
 }: {
   gmailConnected: boolean;
-  profile: MailListItem | null;
+  selectedListItem: MailListItem | null;
+  message: MailMessage | null;
+  messageSource: "cache" | "live" | null;
+  messageLoading: boolean;
+  messageError: string | null;
+  onRetryMessage: () => void;
+  onCloseMessage: () => void;
+  labelName: string;
 }) {
   const router = useRouter();
 
@@ -709,7 +787,7 @@ function MailViewer({
               <ConnectButton plugin="gmail" />
               <Button
                 variant="outline"
-                onClick={() => router.push("/mail?refresh=true")}
+                onClick={() => router.push("/mail?label=INBOX&refresh=true")}
               >
                 Refresh status
               </Button>
@@ -720,33 +798,21 @@ function MailViewer({
     );
   }
 
+  const showEmpty = !messageLoading && !message && !messageError;
+
   return (
     <main className="bg-background flex min-w-0 flex-col overflow-hidden">
-      <div className="border-border bg-card flex h-12 shrink-0 items-center gap-1 border-b px-4">
+      <div className="border-border bg-card flex h-12 shrink-0 items-center gap-1 border-b px-3">
         <MailToolbarButton>
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="9 14 4 9 9 4" />
             <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
           </svg>
           Reply
         </MailToolbarButton>
-        <div className="bg-border my-1 h-8 w-px" />
+        <div className="bg-border my-1 h-6 w-px" />
         <MailToolbarButton>
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="21 8 21 21 3 21 3 8" />
             <rect x="1" y="3" width="22" height="5" />
             <line x1="10" y1="12" x2="14" y2="12" />
@@ -754,14 +820,7 @@ function MailViewer({
           Archive
         </MailToolbarButton>
         <MailToolbarButton>
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="12" cy="12" r="10" />
             <line x1="12" y1="8" x2="12" y2="12" />
             <line x1="12" y1="16" x2="12.01" y2="16" />
@@ -769,28 +828,14 @@ function MailViewer({
           Mark unread
         </MailToolbarButton>
         <MailToolbarButton>
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" />
             <line x1="7" y1="7" x2="7.01" y2="7" />
           </svg>
           Label
         </MailToolbarButton>
         <MailToolbarButton>
-          <svg
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
             <line x1="16" y1="2" x2="16" y2="6" />
             <line x1="8" y1="2" x2="8" y2="6" />
@@ -798,218 +843,423 @@ function MailViewer({
           </svg>
           Create event
         </MailToolbarButton>
-        <div className="bg-border my-1 h-8 w-px" />
+        <div className="bg-border my-1 h-6 w-px" />
         <MailToolbarButton>
-          <svg
-            className="text-primary"
-            width="13"
-            height="13"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
+          <svg className="text-primary" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
           </svg>
           Ask AI
         </MailToolbarButton>
+        {message || messageLoading || messageError ? (
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-xs"
+            onClick={onCloseMessage}
+            className="ml-auto"
+            aria-label="Close message"
+          >
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </Button>
+        ) : null}
       </div>
 
       <div className="flex-1 overflow-y-auto p-6">
-        {profile ? (
+        {messageError ? (
           <div className="border-border bg-card flex min-h-full flex-col justify-center border p-6">
             <Badge variant="secondary" className="w-fit">
-              {profile.from || "Inbox"}
+              Error
             </Badge>
             <h1 className="font-heading mt-4 text-2xl font-semibold tracking-widest uppercase">
-              {profile.subject || "(no subject)"}
+              Couldn&apos;t load this message
             </h1>
             <p className="text-muted-foreground mt-2 max-w-xl text-sm leading-relaxed">
-              {formatReceived(profile.receivedAt)}
+              {messageError}
             </p>
-            <p className="text-foreground mt-4 max-w-xl text-sm leading-relaxed">
-              {profile.snippet}
-            </p>
-            <p className="text-muted-foreground mt-4 text-[0.625rem] tracking-[0.16em] uppercase">
-              Select a thread from the list to read the full message.
-            </p>
+            <div className="mt-5 flex flex-wrap gap-2">
+              <Button type="button" onClick={onRetryMessage}>
+                Retry
+              </Button>
+              <Button type="button" variant="outline" onClick={onCloseMessage}>
+                Close
+              </Button>
+            </div>
           </div>
-        ) : (
+        ) : messageLoading ? (
+          <div className="border-border bg-card flex min-h-full flex-col gap-3 border p-6">
+            <div className="bg-muted h-3 w-24 animate-pulse" />
+            <div className="bg-muted h-6 w-3/4 animate-pulse" />
+            <div className="bg-muted h-3 w-40 animate-pulse" />
+            <div className="mt-6 flex flex-col gap-2">
+              <div className="bg-muted h-3 w-full animate-pulse" />
+              <div className="bg-muted h-3 w-full animate-pulse" />
+              <div className="bg-muted h-3 w-5/6 animate-pulse" />
+              <div className="bg-muted h-3 w-2/3 animate-pulse" />
+            </div>
+          </div>
+        ) : message ? (
+          <article className="border-border bg-card flex min-h-full flex-col border p-6">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge variant="secondary" className="w-fit">
+                {decodeHtmlEntities(message.from) || "Inbox"}
+              </Badge>
+              {messageSource ? (
+                <span className="text-muted-foreground text-[0.625rem] tracking-[0.16em] uppercase">
+                  {messageSource === "cache" ? "Cached" : "Live"}
+                </span>
+              ) : null}
+            </div>
+            <h1 className="font-heading mt-4 text-2xl font-semibold tracking-widest uppercase">
+              {decodeHtmlEntities(message.subject) || "(no subject)"}
+            </h1>
+            <div className="text-muted-foreground mt-3 flex flex-col gap-1 text-xs">
+              <p>
+                <span className="text-foreground font-semibold">From:</span>{" "}
+                {decodeHtmlEntities(message.from) || "(unknown)"}
+              </p>
+              {message.to ? (
+                <p>
+                  <span className="text-foreground font-semibold">To:</span>{" "}
+                  {message.to}
+                </p>
+              ) : null}
+              {message.cc ? (
+                <p>
+                  <span className="text-foreground font-semibold">Cc:</span>{" "}
+                  {message.cc}
+                </p>
+              ) : null}
+              {message.date ? (
+                <p>
+                  <span className="text-foreground font-semibold">Date:</span>{" "}
+                  {message.date}
+                </p>
+              ) : null}
+            </div>
+            {message.bodyHtml ? (
+              <div className="mt-6">
+                <EmailIframe html={message.bodyHtml} />
+              </div>
+            ) : message.bodyText ? (
+              <pre
+                className="text-foreground mt-6 max-w-none text-sm leading-relaxed whitespace-pre-wrap"
+                dangerouslySetInnerHTML={{ __html: linkifyText(message.bodyText) }}
+              />
+            ) : (
+              <p className="text-muted-foreground mt-6 text-sm">
+                {decodeHtmlEntities(message.snippet) || "(no body)"}
+              </p>
+            )}
+            {message.attachments.length > 0 ? (
+              <div className="mt-6 border-t pt-4">
+                <p className="text-muted-foreground mb-2 text-[0.55rem] font-bold tracking-[0.16em] uppercase">
+                  Attachments ({message.attachments.length})
+                </p>
+                <ul className="flex flex-col gap-1.5">
+                  {message.attachments.map((att: { attachmentId: string; filename: string; mimeType: string; size: number }) => (
+                    <li
+                      key={att.attachmentId}
+                      className="flex items-center gap-2 text-xs"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-muted-foreground shrink-0">
+                        <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+                      </svg>
+                      <span className="truncate">{att.filename}</span>
+                      <span className="text-muted-foreground text-[0.625rem]">
+                        {att.mimeType}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </article>
+        ) : showEmpty ? (
           <div className="border-border bg-card flex min-h-full flex-col justify-center border p-6">
             <Badge variant="secondary" className="w-fit">
-              Inbox
+              {labelName}
             </Badge>
             <h1 className="font-heading mt-4 text-2xl font-semibold tracking-widest uppercase">
-              Select a thread
+              {selectedListItem
+                ? selectedListItem.subject || "(no subject)"
+                : "Select a thread"}
             </h1>
-            <p className="text-muted-foreground mt-2 max-w-xl text-sm leading-relaxed">
-              Pick a conversation from the list on the left to read the full
-              message.
-            </p>
+            {selectedListItem ? (
+              <>
+                <p className="text-muted-foreground mt-2 max-w-xl text-sm leading-relaxed">
+                  {decodeHtmlEntities(selectedListItem.from)} ·{" "}
+                  {formatReceived(selectedListItem.receivedAt)}
+                </p>
+                <p className="text-foreground mt-4 max-w-xl text-sm leading-relaxed">
+                  {decodeHtmlEntities(selectedListItem.snippet)}
+                </p>
+                <p className="text-muted-foreground mt-4 text-[0.625rem] tracking-[0.16em] uppercase">
+                  Press Enter or click the row again to open the full message.
+                </p>
+              </>
+            ) : (
+              <p className="text-muted-foreground mt-2 max-w-xl text-sm leading-relaxed">
+                Pick a conversation from the list on the left to read the full
+                message.
+              </p>
+            )}
           </div>
-        )}
+        ) : null}
       </div>
     </main>
   );
 }
 
-function MailAssistant() {
-  return (
-    <aside className="border-border bg-card flex h-full min-w-0 flex-col border-l">
-      <div className="border-border flex h-11 shrink-0 items-center gap-2 border-b px-4">
-        <div className="text-primary">
-          <svg
-            width="15"
-            height="15"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
-            <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-          </svg>
-        </div>
-        <span className="flex-1 text-sm font-bold">Assistant</span>
-        <div className="flex items-center gap-0.5">
-          <Button variant="ghost" size="icon" className="size-6">
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
-              <circle cx="12" cy="10" r="3" />
-            </svg>
-          </Button>
-          <Button variant="ghost" size="icon" className="size-6">
-            <svg
-              width="12"
-              height="12"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-            >
-              <line x1="18" y1="6" x2="6" y2="18" />
-              <line x1="6" y1="6" x2="18" y2="18" />
-            </svg>
-          </Button>
-        </div>
-      </div>
+// ─── Main Interface ─────────────────────────────────────────────────────────
 
-      <div className="overflow-y-auto px-4 pt-3 pb-4">
-        <p className="text-muted-foreground mb-2 text-[0.55rem] font-bold tracking-[0.16em] uppercase">
-          Suggested Actions
-        </p>
+export function MailInterface({
+  initial,
+  initialLabel,
+}: {
+  initial: MailPageData;
+  initialLabel: string;
+}) {
+  const gmailConnected = initial.gmailConnected;
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
-        <AssistantActionCard
-          title="Summarize thread"
-          description="Get a concise summary of this conversation."
-        >
-          <svg
-            width="15"
-            height="15"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
-            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-            <polyline points="14 2 14 8 20 8" />
-            <line x1="16" y1="13" x2="8" y2="13" />
-            <line x1="16" y1="17" x2="8" y2="17" />
-            <polyline points="10 9 9 9 8 9" />
-          </svg>
-        </AssistantActionCard>
-        <AssistantActionCard
-          title="Schedule follow-up"
-          description="Find time and propose a follow-up."
-        >
-          <svg
-            width="15"
-            height="15"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
-            <rect x="3" y="4" width="18" height="18" rx="2" ry="2" />
-            <line x1="16" y1="2" x2="16" y2="6" />
-            <line x1="8" y1="2" x2="8" y2="6" />
-            <line x1="3" y1="10" x2="21" y2="10" />
-          </svg>
-        </AssistantActionCard>
-        <AssistantActionCard
-          title="Draft reply"
-          description="Generate a reply based on this thread."
-        >
-          <svg
-            width="15"
-            height="15"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
-            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-          </svg>
-        </AssistantActionCard>
-        <AssistantActionCard
-          title="Find related events"
-          description="Show events related to this conversation."
-        >
-          <svg
-            width="15"
-            height="15"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-          >
-            <circle cx="11" cy="11" r="8" />
-            <line x1="21" y1="21" x2="16.65" y2="16.65" />
-          </svg>
-        </AssistantActionCard>
-      </div>
+  const activeLabel = searchParams.get("label") ?? initialLabel ?? "INBOX";
+  const labelDef = LABEL_DEFS.find((l) => l.id === activeLabel);
+  const labelName = labelDef?.name ?? activeLabel;
+  const labelIds = getLabelIdsForView(activeLabel);
 
-      <div className="border-border text-muted-foreground border-t px-4 py-3 text-center text-[0.625rem]">
-        AI can make mistakes. Check important info.
-      </div>
-    </aside>
+  // ─── TanStack Query hooks ──────────────────────────────────────────────
+  const [pageIndex, setPageIndex] = useState(0);
+  const [pageTokens, setPageTokens] = useState<(string | undefined)[]>([undefined]);
+  const [pageError, setPageError] = useState<string | null>(null);
+
+  const currentPageToken = pageTokens[pageIndex];
+
+  const threadsQuery = useMailThreads({
+    page: pageIndex,
+    pageSize: 25,
+    token: currentPageToken,
+    labelIds,
+    initialData: initial.gmailConnected ? initial.list : undefined,
+  });
+
+  const labelsQuery = useMailLabels(
+    initial.gmailConnected ? initial.labels : undefined,
   );
-}
 
-export function MailInterface({ initial }: { initial: MailPageData }) {
-  const listItems: MailListItem[] = initial.gmailConnected
-    ? initial.list.items
-    : [];
-  const syncedState: SyncedState = !initial.gmailConnected
+  const profileQuery = useMailProfile(
+    initial.gmailConnected ? initial.profile : undefined,
+  );
+
+  const refreshMutation = useRefreshInbox();
+  const clearCacheMutation = useClearMailCache();
+
+  // ─── Local UI state ────────────────────────────────────────────────────
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const messageQuery = useMailMessage(selectedId);
+
+  // ─── Derived state ─────────────────────────────────────────────────────
+  const items: MailListItem[] = (() => {
+    const raw = threadsQuery.data?.items ?? [];
+    const seen = new Set<string>();
+    return raw.filter((item) => {
+      if (seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    });
+  })();
+
+  const hasMore = threadsQuery.data?.nextPageToken !== null && threadsQuery.data?.nextPageToken !== undefined;
+  const totalPages = Math.max(1, pageIndex + 1 + (hasMore ? 1 : 0));
+
+  const labels: MailLabel[] = labelsQuery.data ?? [];
+  const profile: MailProfile | null = profileQuery.data ?? null;
+
+  const syncedState: SyncedState = !gmailConnected
     ? "Not connected"
-    : initial.list.items.length === 0
-      ? "No mail cached"
-      : "Synced";
-  const preview = listItems[0] ?? null;
+    : threadsQuery.isLoading
+      ? "Loading..."
+      : items.length === 0
+        ? "No mail cached"
+        : "Synced";
+
+  const selectedListItem = items.find((i) => i.id === selectedId) ?? null;
+
+  // ─── Reset page when label changes ────────────────────────────────────
+  useEffect(() => {
+    setPageIndex(0);
+    setPageTokens([undefined]);
+    setSelectedId(null);
+  }, [activeLabel]);
+
+  // ─── Callbacks ─────────────────────────────────────────────────────────
+  const onSelect = useCallback((id: string) => {
+    setSelectedId(id);
+  }, []);
+
+  const onOpen = useCallback((id: string) => {
+    setSelectedId(id);
+  }, []);
+
+  const onPageChange = useCallback(
+    async (newPage: number) => {
+      if (newPage === pageIndex) return;
+
+      if (newPage > pageIndex) {
+        // Going forward: check if we have more pages
+        const lastToken = pageTokens[pageIndex] ?? threadsQuery.data?.nextPageToken;
+        if (!lastToken && pageIndex > 0) return;
+
+        setPageError(null);
+        try {
+          const params = new URLSearchParams({
+            page: String(newPage),
+            pageSize: "25",
+          });
+          if (lastToken) params.set("token", lastToken);
+          if (labelIds?.length) params.set("labelIds", labelIds.join(","));
+
+          const res = await fetch(`/api/mail/threads?${params.toString()}`, { cache: "no-store" });
+          if (!res.ok) throw new Error(`Failed to load page (${res.status})`);
+          const data = await res.json();
+
+          const newTokens = [...pageTokens];
+          newTokens[newPage] = data.nextPageToken ?? undefined;
+          setPageTokens(newTokens);
+          setPageIndex(newPage);
+        } catch (err) {
+          setPageError(err instanceof Error ? err.message : "Failed to load page");
+        }
+      } else {
+        // Going back: data should be in TanStack Query cache
+        setPageIndex(newPage);
+      }
+    },
+    [pageIndex, pageTokens, threadsQuery.data?.nextPageToken, labelIds],
+  );
+
+  const onClose = useCallback(() => {
+    setSelectedId(null);
+  }, []);
+
+  const onRefresh = useCallback(() => {
+    refreshMutation.mutate();
+    threadsQuery.refetch();
+    labelsQuery.refetch();
+  }, [refreshMutation, threadsQuery, labelsQuery]);
+
+  const onClearCache = useCallback(() => {
+    clearCacheMutation.mutate(undefined, {
+      onSuccess: () => {
+        setSelectedId(null);
+        setPageIndex(0);
+        setPageTokens([undefined]);
+        threadsQuery.refetch();
+        labelsQuery.refetch();
+        profileQuery.refetch();
+      },
+    });
+  }, [clearCacheMutation, threadsQuery, labelsQuery, profileQuery]);
+
+  // ─── Keyboard shortcuts ────────────────────────────────────────────────
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+      if (!items.length) return;
+
+      if (event.key === "j" || event.key === "ArrowDown") {
+        event.preventDefault();
+        setSelectedId((current) => {
+          const idx = current ? items.findIndex((i) => i.id === current) : -1;
+          const next = items[Math.min(items.length - 1, idx + 1)];
+          return next?.id ?? current;
+        });
+      } else if (event.key === "k" || event.key === "ArrowUp") {
+        event.preventDefault();
+        setSelectedId((current) => {
+          if (!current) return items[items.length - 1]?.id ?? null;
+          const idx = items.findIndex((i) => i.id === current);
+          const next = items[Math.max(0, idx - 1)];
+          return next?.id ?? current;
+        });
+      } else if (event.key === "Enter" || event.key === "o") {
+        if (selectedId) {
+          event.preventDefault();
+          onOpen(selectedId);
+        }
+      } else if (event.key === "Escape") {
+        if (selectedId) {
+          event.preventDefault();
+          onClose();
+        }
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [items, selectedId, onOpen, onClose]);
 
   return (
     <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <MailTopNav syncedState={syncedState} />
+      <MailTopNav
+        syncedState={syncedState}
+        profile={profile}
+        onRefresh={onRefresh}
+        onClearCache={onClearCache}
+        isRefreshing={refreshMutation.isPending}
+        isClearing={clearCacheMutation.isPending}
+      />
       <ResizablePanelGroup className="min-h-0 flex-1">
-        <ResizablePanel>
-          <MailSidebar gmailConnected={initial.gmailConnected} />
+        <ResizablePanel defaultSize={16} minSize={12}>
+          <MailSidebar labels={labels} activeLabel={activeLabel} profile={profile} />
         </ResizablePanel>
         <ResizableHandle withHandle />
-        <ResizablePanel>
-          <MailList items={listItems} />
+        <ResizablePanel defaultSize={30} minSize={20}>
+          <div
+            className={cn(
+              "relative flex min-w-0 flex-col",
+              threadsQuery.isFetching && "pointer-events-none opacity-70",
+            )}
+          >
+            <MailList
+              items={items}
+              selectedId={selectedId}
+              onSelect={onSelect}
+              onOpen={onOpen}
+              page={pageIndex}
+              totalPages={totalPages}
+              onPageChange={onPageChange}
+              loading={threadsQuery.isFetching}
+              error={pageError}
+              isInitialLoading={threadsQuery.isLoading}
+              labelName={labelName}
+            />
+          </div>
         </ResizablePanel>
         <ResizableHandle withHandle />
-        <ResizablePanel>
+        <ResizablePanel defaultSize={54} minSize={30}>
           <MailViewer
-            gmailConnected={initial.gmailConnected}
-            profile={preview}
+            gmailConnected={gmailConnected}
+            selectedListItem={selectedListItem}
+            message={messageQuery.data?.message ?? null}
+            messageSource={messageQuery.data?.source ?? null}
+            messageLoading={messageQuery.isLoading}
+            messageError={messageQuery.error?.message ?? null}
+            onRetryMessage={() => messageQuery.refetch()}
+            onCloseMessage={onClose}
+            labelName={labelName}
           />
         </ResizablePanel>
       </ResizablePanelGroup>

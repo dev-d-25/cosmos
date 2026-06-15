@@ -4,6 +4,7 @@ import { AuthMissingError } from "corsair/core";
 import { getSessionTenantId } from "@/server/auth";
 import { z } from "zod";
 import { MailMessageSchema, MailMessageQuerySchema } from "@/server/mail/schemas";
+import { toMailMessage } from "@/server/mail/transformers";
 
 export async function GET(
   _req: Request,
@@ -16,7 +17,7 @@ export async function GET(
 
   try {
     const { id } = await params;
-    const rawRefresh = new URL(_req.url).searchParams.get("refresh");
+    const rawRefresh = new URL(_req.url).searchParams.get("refresh") ?? undefined;
 
     const query = MailMessageQuerySchema.parse({
       refresh: rawRefresh,
@@ -25,7 +26,8 @@ export async function GET(
     const result = await getMessage(id, { force: query.refresh === "true" });
     if (!result) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    const parsed = MailMessageSchema.safeParse(result.message);
+    const transformed = toMailMessage(result.message);
+    const parsed = MailMessageSchema.safeParse(transformed);
     if (!parsed.success) {
       return NextResponse.json(
         { error: "Invalid message data" },

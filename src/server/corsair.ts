@@ -8,7 +8,37 @@ import { db, conn } from "./db";
 import { corsairAccounts, corsairIntegrations } from "./db/schema";
 
 export const corsair = createCorsair({
-  plugins: [gmail(), googlecalendar()],
+  plugins: [
+    gmail({
+      webhookHooks: {
+        messageChanged: {
+          before(ctx, args) {
+            const body = args.payload as {
+              message?: { data?: string };
+            };
+            const data = body?.message?.data;
+            const decoded = data
+              ? (JSON.parse(
+                  Buffer.from(data, "base64").toString("utf-8"),
+                ) as { emailAddress?: string; historyId?: string })
+              : null;
+            console.info("[gmail:webhook] messageChanged", {
+              email: decoded?.emailAddress,
+              historyId: decoded?.historyId,
+            });
+            return { ctx, args };
+          },
+          after(ctx, response) {
+            console.info("[gmail:webhook] messageChanged processed", {
+              type: response?.data?.type,
+              email: response?.data?.emailAddress,
+            });
+          },
+        },
+      },
+    }),
+    googlecalendar(),
+  ],
   database: conn,
   kek: process.env.CORSAIR_KEK!,
   multiTenancy: true,

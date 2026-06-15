@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cosmos Mail</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="h-screen flex bg-gray-100">
+  <!-- Sidebar -->
+  <aside class="w-64 bg-white border-r p-4">
+    <h2 class="text-xl font-semibold mb-4">Folders</h2>
+    <ul class="space-y-2">
+      <li><button class="w-full text-left p-2 hover:bg-gray-200" data-label="INBOX">Inbox</button></li>
+      <li><button class="w-full text-left p-2 hover:bg-gray-200" data-label="DRAFTS">Drafts</button></li>
+      <li><button class="w-full text-left p-2 hover:bg-gray-200" data-label="SENT">Sent</button></li>
+      <li><button class="w-full text-left p-2 hover:bg-gray-200" data-label="TRASH">Trash</button></li>
+    </ul>
+  </aside>
+  <!-- Message List -->
+  <section class="flex-1 overflow-y-auto border-r p-4" id="message-list">
+    <h2 class="text-xl font-semibold mb-4">Messages</h2>
+    <ul class="space-y-2" id="messages"></ul>
+  </section>
+  <!-- Message Viewer -->
+  <section class="flex-1 overflow-y-auto p-4" id="message-viewer">
+    <h2 class="text-xl font-semibold mb-4">Message</h2>
+    <div id="message-content" class="prose"></div>
+  </section>
+  <script>
+    // Placeholder data – replace with real API calls later
+    const sampleMessages = [
+      { id: '1', from: 'Alice <alice@example.com>', subject: 'Welcome', snippet: 'Hello, welcome to Cosmos Mail...' },
+      { id: '2', from: 'Bob <bob@example.com>', subject: 'Meeting', snippet: 'Let\'s schedule a meeting...' },
+    ];
+    const listEl = document.getElementById('messages');
+    const viewer = document.getElementById('message-content');
+    sampleMessages.forEach(msg => {
+      const li = document.createElement('li');
+      li.className = 'p-2 hover:bg-gray-100 cursor-pointer';
+      li.innerHTML = `<div class="font-medium">${msg.subject}</div><div class="text-sm text-gray-600">${msg.from}</div><div class="text-xs text-gray-500">${msg.snippet}</div>`;
+      li.addEventListener('click', () => {
+        // In real UI fetch full message via API
+        viewer.innerHTML = `<h3 class='font-bold'>${msg.subject}</h3><p><strong>From:</strong> ${msg.from}</p><p>${msg.snippet} (full content would be loaded here)</p>`;
+      });
+      listEl.appendChild(li);
+    });
+  </script>
+</body>
+</html>

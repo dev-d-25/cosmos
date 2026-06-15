@@ -108,7 +108,7 @@ export function toListItem(row: { data: Record<string, unknown> }): MailListItem
     from,
     snippet,
     receivedAt,
-    unread: !labelIds.includes("UNREAD"),
+    unread: labelIds.includes("UNREAD"),
     labelIds,
   };
 }

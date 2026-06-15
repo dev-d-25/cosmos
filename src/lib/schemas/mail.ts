@@ -58,7 +58,9 @@ export const MailListResponseSchema = z.object({
 });
 
 export const MailThreadsQuerySchema = z.object({
-  limit: z.coerce.number().int().positive().default(50),
+  page: z.coerce.number().int().min(0).default(0),
+  pageSize: z.coerce.number().int().positive().max(100).default(50),
+  token: z.string().optional(),
   refresh: z.enum(["true", "false"]).default("false"),
 });
 

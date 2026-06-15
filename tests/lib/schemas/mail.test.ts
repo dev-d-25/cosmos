@@ -199,18 +199,42 @@ describe("Mail schemas", () => {
   describe("MailThreadsQuerySchema", () => {
     it("parses default values when omitted", () => {
       const result = MailThreadsQuerySchema.parse({});
-      expect(result.limit).toBe(50);
+      expect(result.page).toBe(0);
+      expect(result.pageSize).toBe(50);
       expect(result.refresh).toBe("false");
+      expect(result.token).toBeUndefined();
     });
 
-    it("rejects negative limit", () => {
-      const result = MailThreadsQuerySchema.safeParse({ limit: -1 });
+    it("rejects negative page", () => {
+      const result = MailThreadsQuerySchema.safeParse({ page: -1 });
       expect(result.success).toBe(false);
     });
 
-    it("accepts positive limit and refresh true", () => {
-      const result = MailThreadsQuerySchema.parse({ limit: 20, refresh: "true" });
-      expect(result.limit).toBe(20);
+    it("rejects non-integer page", () => {
+      const result = MailThreadsQuerySchema.safeParse({ page: 1.5 });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects pageSize above max", () => {
+      const result = MailThreadsQuerySchema.safeParse({ pageSize: 500 });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects non-positive pageSize", () => {
+      const result = MailThreadsQuerySchema.safeParse({ pageSize: 0 });
+      expect(result.success).toBe(false);
+    });
+
+    it("accepts page, pageSize, token, refresh true", () => {
+      const result = MailThreadsQuerySchema.parse({
+        page: 2,
+        pageSize: 20,
+        token: "abc123",
+        refresh: "true",
+      });
+      expect(result.page).toBe(2);
+      expect(result.pageSize).toBe(20);
+      expect(result.token).toBe("abc123");
       expect(result.refresh).toBe("true");
     });
 

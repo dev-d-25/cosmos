@@ -67,7 +67,10 @@ describe("transformers", () => {
       const payload = {
         mimeType: "multipart/alternative",
         parts: [
-          { mimeType: "text/plain", body: { data: Buffer.from("plain").toString("base64") } },
+          {
+            mimeType: "text/plain",
+            body: { data: Buffer.from("plain").toString("base64") },
+          },
           { mimeType: "text/html", body: { data: html } },
         ],
       };
@@ -83,9 +86,7 @@ describe("transformers", () => {
         parts: [
           {
             mimeType: "multipart/alternative",
-            parts: [
-              { mimeType: "text/html", body: { data: html } },
-            ],
+            parts: [{ mimeType: "text/html", body: { data: html } }],
           },
         ],
       };
@@ -171,7 +172,7 @@ describe("transformers", () => {
         ],
       };
       const result = getPartAttachments(payload);
-      expect(result[0].mimeType).toBe("application/octet-stream");
+      expect(result[0]?.mimeType).toBe("application/octet-stream");
     });
 
     it("skips multipart container parts", () => {
@@ -276,7 +277,9 @@ describe("transformers", () => {
         },
       };
       const result = toListItem(row);
-      expect(result.receivedAt).toBe(new Date(Number("1700000000000")).toISOString());
+      expect(result.receivedAt).toBe(
+        new Date(Number("1700000000000")).toISOString(),
+      );
     });
   });
 
