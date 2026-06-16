@@ -97,8 +97,24 @@ export function toListItem(row: { data: Record<string, unknown> }): MailListItem
   const labelIds = (d.labelIds as string[] | undefined) ?? [];
   const id = (d.id as string | undefined) ?? "";
   const threadId = (d.threadId as string | undefined) ?? "";
-  const subject = (d.subject as string | undefined) ?? (d.snippet as string | undefined) ?? "";
-  const from = (d.from as string | undefined) ?? "";
+
+  // Extract subject: prefer pre-extracted field, then payload headers, then snippet
+  const subject = (d.subject as string | undefined)
+    ?? getHeader(
+        (d.payload as { headers?: Array<{ name?: string; value?: string }> })?.headers,
+        "Subject",
+      )
+    ?? (d.snippet as string | undefined)
+    ?? "";
+
+  // Extract from: prefer pre-extracted field, then payload headers
+  const from = (d.from as string | undefined)
+    ?? getHeader(
+        (d.payload as { headers?: Array<{ name?: string; value?: string }> })?.headers,
+        "From",
+      )
+    ?? "";
+
   const snippet = (d.snippet as string | undefined) ?? "";
 
   return {

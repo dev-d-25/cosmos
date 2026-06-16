@@ -354,7 +354,7 @@ export function ComposeDialog({
               Subject
             </span>
             <input
-              className="bg-background text-foreground placeholder:text-muted-foreground flex-1 px-1 py-2.5 text-sm outline-none"
+              className="bg-transparent text-foreground placeholder:text-muted-foreground flex-1 px-1 py-2.5 text-sm outline-none"
               placeholder="Subject"
               value={subject}
               onChange={(e) => setSubject(e.target.value)}

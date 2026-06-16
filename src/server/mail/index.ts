@@ -97,20 +97,15 @@ async function syncLabelFromGmail(
     return { nextPageToken: null };
   }
 
-  // Read what corsair auto-cached from messages.list (stubs with labelIds/snippet).
-  // Then enrich only those missing subject/from using metadata format (headers only).
-  const cached = await client.gmail.db.messages.list({
-    limit: ids.length,
-    offset: 0,
-  });
-  const cachedIds = new Set(cached.map((r) => r.data.id));
-  const needsEnrichment = ids.filter((id) => {
-    if (cachedIds.has(id)) {
-      const row = cached.find((r) => r.data.id === id);
-      if (row?.data?.subject && row?.data?.from) return false;
+  // Check which messages already have enriched data (subject + from) in the DB cache.
+  // Use findByEntityId for each ID to get the exact rows we need, not a generic list.
+  const needsEnrichment: string[] = [];
+  for (const id of ids) {
+    const row = await client.gmail.db.messages.findByEntityId(id);
+    if (!row?.data?.subject || !row?.data?.from) {
+      needsEnrichment.push(id);
     }
-    return true;
-  });
+  }
 
   // Enrich with format:"metadata" — only fetches headers (Subject, From, To).
   // This is ~10x faster than format:"full" which downloads the entire MIME tree.
@@ -183,19 +178,14 @@ export async function getMailList(
       return { items: [], nextPageToken: null, source: "live" };
     }
 
-    // Enrich any stubs
-    const cached = await ctx.client.gmail.db.messages.list({
-      limit: ids.length,
-      offset: 0,
-    });
-    const cachedIds = new Set(cached.map((r) => r.data.id));
-    const needsEnrichment = ids.filter((id) => {
-      if (cachedIds.has(id)) {
-        const row = cached.find((r) => r.data.id === id);
-        if (row?.data?.subject && row?.data?.from) return false;
+    // Enrich any stubs missing subject/from
+    const needsEnrichment: string[] = [];
+    for (const id of ids) {
+      const row = await ctx.client.gmail.db.messages.findByEntityId(id);
+      if (!row?.data?.subject || !row?.data?.from) {
+        needsEnrichment.push(id);
       }
-      return true;
-    });
+    }
     const chunks: string[][] = [];
     for (let i = 0; i < needsEnrichment.length; i += ENRICH_CONCURRENCY) {
       chunks.push(needsEnrichment.slice(i, i + ENRICH_CONCURRENCY));
@@ -212,18 +202,15 @@ export async function getMailList(
       );
     }
 
-    // Read enriched rows back
-    const enriched = await ctx.client.gmail.db.messages.list({
-      limit: 100,
-      offset: 0,
-    });
-    const enrichedMap = new Map(enriched.map((r) => [r.data.id, r]));
-    const items = ids
-      .map((id) => {
-        const row = enrichedMap.get(id);
-        return row ? toListItem(row) : null;
-      })
-      .filter((item): item is MailListItem => item !== null);
+    // Read enriched rows back by ID
+    const items: MailListItem[] = [];
+    for (const id of ids) {
+      const row = await ctx.client.gmail.db.messages.findByEntityId(id);
+      if (row) {
+        const item = toListItem(row);
+        if (item.id) items.push(item);
+      }
+    }
 
     return {
       items,
@@ -387,10 +374,19 @@ export async function getMessage(
   if (!opts.force) {
     const cached = await client.gmail.db.messages.findByEntityId(id);
     if (cached?.data?.payload) {
-      return {
-        message: cached.data as Record<string, unknown>,
-        source: "cache",
-      };
+      // Verify the cached payload actually has body data (not just metadata headers).
+      // Messages enriched with format:"metadata" have payload.headers but no body.
+      const hasBody = cached.data.body
+        || cached.data.payload.body?.data
+        || cached.data.payload.parts?.some(
+            (p: { body?: { data?: string } }) => !!p.body?.data,
+          );
+      if (hasBody) {
+        return {
+          message: cached.data as Record<string, unknown>,
+          source: "cache",
+        };
+      }
     }
   }
 

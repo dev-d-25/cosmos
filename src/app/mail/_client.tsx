@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -28,6 +29,7 @@ import {
 import { Kbd } from "@/components/ui/kbd";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { ShortcutsHelp } from "@/components/shortcuts-help";
+import { CommandIcon, SquarePenIcon, StarIcon } from "lucide-react";
 import { ComposeDialog } from "@/components/compose-dialog";
 import {
   CommandDialog,
@@ -86,11 +88,7 @@ const LABEL_DEFS: LabelDef[] = [
   {
     id: "STARRED",
     name: "Starred",
-    icon: (
-      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" strokeWidth="1">
-        <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 1.01 12 2" />
-      </svg>
-    ),
+    icon: <StarIcon size={14} className="shrink-0 opacity-70" />,
     gmailLabel: "STARRED",
   },
   {
@@ -107,12 +105,7 @@ const LABEL_DEFS: LabelDef[] = [
   {
     id: "DRAFT",
     name: "Drafts",
-    icon: (
-      <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-        <polyline points="14 2 14 8 20 2" />
-      </svg>
-    ),
+    icon: <SquarePenIcon size={14} className="shrink-0 opacity-70" />,
     gmailLabel: "DRAFT",
   },
   {
@@ -472,6 +465,8 @@ function MailTopNav({
   isRefreshing,
   isClearing,
   onSearchOpen,
+  shortcutsOpen,
+  onShortcutsOpenChange,
 }: {
   syncedState: SyncedState;
   profile: { emailAddress?: string } | null;
@@ -480,6 +475,8 @@ function MailTopNav({
   isRefreshing: boolean;
   isClearing: boolean;
   onSearchOpen: () => void;
+  shortcutsOpen: boolean;
+  onShortcutsOpenChange: (open: boolean) => void;
 }) {
   const email = profile?.emailAddress ?? "";
   const displayName = email.split("@")[0] ?? "Account";
@@ -521,8 +518,8 @@ function MailTopNav({
         <input
           className="border-border bg-muted text-foreground placeholder:text-muted-foreground h-8 w-full rounded-none border px-3 pr-14 pl-8 text-xs outline-none"
           placeholder="Search mail, events, people, or ask AI..."
-          onFocus={(e) => {
-            e.target.blur();
+          onMouseDown={(e) => {
+            e.preventDefault();
             onSearchOpen();
           }}
           readOnly
@@ -578,6 +575,22 @@ function MailTopNav({
         </Button>
 
         <div className="bg-border h-5 w-px" />
+
+        <ShortcutsHelp open={shortcutsOpen} onOpenChange={onShortcutsOpenChange}>
+          <Tooltip>
+            <TooltipTrigger
+              render={
+                <div className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md">
+                  <CommandIcon size={14} />
+                </div>
+              }
+            />
+            <TooltipContent side="bottom" sideOffset={6}>
+              <span>Keyboard Shortcuts</span>
+              <Kbd className="ml-1">?</Kbd>
+            </TooltipContent>
+          </Tooltip>
+        </ShortcutsHelp>
 
         <ProfileDropdown profile={profile} />
 
@@ -697,6 +710,16 @@ function MailList({
     );
   }
 
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!selectedId || !scrollRef.current) return;
+    const el = scrollRef.current.querySelector(`[data-message-id="${selectedId}"]`);
+    if (el) {
+      el.scrollIntoView({ block: "nearest" });
+    }
+  }, [selectedId]);
+
   return (
     <div className="border-border bg-card flex min-w-0 flex-col border-r">
       <div className="border-border flex h-11 shrink-0 items-center gap-2 border-b px-4">
@@ -731,11 +754,10 @@ function MailList({
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto">
         {items.map((item) => {
           const isSelected = selectedId === item.id;
           const isRead = !item.unread || isReadLocally(item.id);
-          const currentIndex = items.findIndex((i) => i.id === selectedId);
           return (
             <button
               key={item.id}
@@ -746,9 +768,9 @@ function MailList({
               data-selected={isSelected ? "true" : "false"}
               aria-current={isSelected ? "true" : undefined}
               className={cn(
-                "border-border hover:bg-accent block w-full border-b px-4 py-3 text-left transition",
+                "border-border hover:bg-accent block w-full border-b border-l-2 border-l-transparent px-4 py-3 text-left transition",
                 isRead ? "bg-muted" : "",
-                isSelected && "bg-accent",
+                isSelected && "bg-accent border-l-primary",
               )}
             >
               <div className="mb-1 flex items-center gap-2">
@@ -777,6 +799,7 @@ function MailList({
                     .filter(
                       (l) =>
                         ![
+                          "INBOX",
                           "UNREAD",
                           "IMPORTANT",
                           "CATEGORY_PERSONAL",
@@ -882,9 +905,11 @@ function MailViewer({
 }) {
   const router = useRouter();
 
+  const showEmpty = !messageLoading && !message && !messageError;
+
   if (!gmailConnected) {
     return (
-      <main className="bg-background flex min-w-0 flex-col overflow-hidden">
+    <main className="bg-background flex min-w-0 flex-col overflow-hidden border-l border-border">
         <div className="flex-1 overflow-y-auto p-6">
           <div className="border-border bg-card flex min-h-full flex-col justify-center border p-6">
             <Badge variant="secondary" className="w-fit">
@@ -912,8 +937,6 @@ function MailViewer({
       </main>
     );
   }
-
-  const showEmpty = !messageLoading && !message && !messageError;
 
   return (
     <main className="bg-background flex min-w-0 flex-col overflow-hidden">
@@ -976,9 +999,7 @@ function MailViewer({
           shortcut="S"
           onClick={() => selectedListItem && onAction("star", selectedListItem.threadId)}
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 1.01 12 2" />
-          </svg>
+          <StarIcon size={14} />
         </MailToolbarButton>
         <div className="bg-border mx-1 h-5 w-px" />
         <MailToolbarButton label="Label" shortcut="L">
@@ -995,24 +1016,6 @@ function MailViewer({
             <line x1="3" y1="10" x2="21" y2="10" />
           </svg>
         </MailToolbarButton>
-        <div className="bg-border mx-1 h-5 w-px" />
-        <ShortcutsHelp>
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <div className="text-muted-foreground hover:bg-accent hover:text-foreground flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md">
-                  <svg className="text-primary" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-                  </svg>
-                </div>
-              }
-            />
-            <TooltipContent side="bottom" sideOffset={6}>
-              <span>Keyboard Shortcuts</span>
-              <Kbd className="ml-1">?</Kbd>
-            </TooltipContent>
-          </Tooltip>
-        </ShortcutsHelp>
         {message || messageLoading || messageError ? (
           <Button
             type="button"
@@ -1199,6 +1202,7 @@ export function MailInterface({
   const [searchInput, setSearchInput] = useState<string>("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [composeOpen, setComposeOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
   const gmailParams = searchQuery
     ? { query: searchQuery }
@@ -1378,6 +1382,25 @@ export function MailInterface({
   );
 
   // ─── Keyboard shortcuts ────────────────────────────────────────────────
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  const onOpenRef = useRef(onOpen);
+  onOpenRef.current = onOpen;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const onMailActionRef = useRef(onMailAction);
+  onMailActionRef.current = onMailAction;
+  const composeOpenRef = useRef(composeOpen);
+  composeOpenRef.current = composeOpen;
+  const searchOpenRef = useRef(searchOpen);
+  searchOpenRef.current = searchOpen;
+  const shortcutsOpenRef = useRef(shortcutsOpen);
+  shortcutsOpenRef.current = shortcutsOpen;
+  const setShortcutsOpenRef = useRef(setShortcutsOpen);
+  setShortcutsOpenRef.current = setShortcutsOpen;
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
@@ -1391,60 +1414,66 @@ export function MailInterface({
         return;
       }
       // Don't fire shortcuts when dialogs are open
-      if (composeOpen || searchOpen) return;
-      if (!items.length) return;
+      if (composeOpenRef.current || searchOpenRef.current) return;
+      const currentItems = itemsRef.current;
+      if (!currentItems.length) return;
+
+      const currentSelectedId = selectedIdRef.current;
 
       if (event.key === "j" || event.key === "ArrowDown") {
         event.preventDefault();
         setSelectedId((current) => {
-          const idx = current ? items.findIndex((i) => i.id === current) : -1;
-          const next = items[Math.min(items.length - 1, idx + 1)];
+          const idx = current ? currentItems.findIndex((i) => i.id === current) : -1;
+          const next = currentItems[Math.min(currentItems.length - 1, idx + 1)];
           return next?.id ?? current;
         });
       } else if (event.key === "k" || event.key === "ArrowUp") {
         event.preventDefault();
         setSelectedId((current) => {
-          if (!current) return items[items.length - 1]?.id ?? null;
-          const idx = items.findIndex((i) => i.id === current);
-          const next = items[Math.max(0, idx - 1)];
+          if (!current) return currentItems[currentItems.length - 1]?.id ?? null;
+          const idx = currentItems.findIndex((i) => i.id === current);
+          const next = currentItems[Math.max(0, idx - 1)];
           return next?.id ?? current;
         });
       } else if (event.key === "Enter" || event.key === "o") {
-        if (selectedId) {
+        if (currentSelectedId) {
           event.preventDefault();
-          onOpen(selectedId);
+          onOpenRef.current(currentSelectedId);
         }
       } else if (event.key === "Escape") {
-        if (selectedId) {
+        if (currentSelectedId) {
           event.preventDefault();
-          onClose();
+          onCloseRef.current();
         }
-      } else if (event.key === "e" && selectedId) {
+      } else if (event.key === "e" && currentSelectedId) {
         event.preventDefault();
-        onMailAction("archive", selectedId);
-      } else if (event.key === "#" && selectedId) {
+        onMailActionRef.current("archive", currentSelectedId);
+      } else if (event.key === "#" && currentSelectedId) {
         event.preventDefault();
-        onMailAction("trash", selectedId);
-      } else if (event.key === "s" && selectedId) {
+        onMailActionRef.current("trash", currentSelectedId);
+      } else if (event.key === "s" && currentSelectedId) {
         event.preventDefault();
-        onMailAction("star", selectedId);
-      } else if (event.key === "u" && selectedId) {
+        onMailActionRef.current("star", currentSelectedId);
+      } else if (event.key === "u" && currentSelectedId) {
         event.preventDefault();
-        onMailAction("markUnread", selectedId);
-      } else if (event.key === "r" && selectedId) {
+        onMailActionRef.current("markUnread", currentSelectedId);
+      } else if (event.key === "r" && currentSelectedId) {
         event.preventDefault();
         // TODO: open reply compose
-      } else if (event.key === "f" && selectedId) {
+      } else if (event.key === "f" && currentSelectedId) {
         event.preventDefault();
         // TODO: open forward compose
-      } else if (event.key === "l" && selectedId) {
+      } else if (event.key === "l" && currentSelectedId) {
         event.preventDefault();
         // TODO: open label picker
+      } else if (event.key === "?") {
+        event.preventDefault();
+        setShortcutsOpenRef.current(true);
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [items, selectedId, onOpen, onClose, onMailAction, composeOpen, searchOpen]);
+  }, []);
 
   return (
     <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
@@ -1456,6 +1485,8 @@ export function MailInterface({
         isRefreshing={refreshMutation.isPending}
         isClearing={clearCacheMutation.isPending}
         onSearchOpen={() => setSearchOpen(true)}
+        shortcutsOpen={shortcutsOpen}
+        onShortcutsOpenChange={setShortcutsOpen}
       />
       <ResizablePanelGroup className="min-h-0 flex-1">
         <ResizablePanel defaultSize={16} minSize={12}>

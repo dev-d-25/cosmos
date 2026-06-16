@@ -1,12 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import {
   Popover,
   PopoverTrigger,
   PopoverContent,
 } from "@/components/ui/popover";
 import { Kbd } from "@/components/ui/kbd";
+import { CommandIcon } from "lucide-react";
 
 interface ShortcutGroup {
   title: string;
@@ -72,8 +73,28 @@ function ShortcutKeys({ keys }: { keys: string[] }) {
   );
 }
 
-export function ShortcutsHelp({ children }: { children: React.ReactNode }) {
-  const [open, setOpen] = useState(false);
+export function ShortcutsHelp({
+  open: controlledOpen,
+  onOpenChange: controlledOnOpenChange,
+  children,
+}: {
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  children?: React.ReactNode;
+}) {
+  const [internalOpen, setInternalOpen] = useState(false);
+  const isControlled = controlledOpen !== undefined;
+  const open = isControlled ? controlledOpen : internalOpen;
+  const setOpen = useCallback(
+    (value: boolean) => {
+      if (isControlled) {
+        controlledOnOpenChange?.(value);
+      } else {
+        setInternalOpen(value);
+      }
+    },
+    [isControlled, controlledOnOpenChange],
+  );
 
   return (
     <Popover open={open} onOpenChange={setOpen}>

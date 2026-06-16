@@ -135,7 +135,7 @@ export const RecipientInput = forwardRef<HTMLInputElement, RecipientInputProps>(
             ref.current = node;
           }
         }}
-        className="bg-background text-foreground placeholder:text-muted-foreground w-full px-1 py-2.5 text-sm outline-none"
+        className="bg-transparent text-foreground placeholder:text-muted-foreground w-full px-1 py-2.5 text-sm outline-none"
         placeholder={placeholder}
         value={value}
         onChange={(e) => {
