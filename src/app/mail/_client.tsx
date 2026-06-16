@@ -32,14 +32,6 @@ import { ShortcutsHelp } from "@/components/shortcuts-help";
 import { CommandIcon, SquarePenIcon, StarIcon } from "lucide-react";
 import { ComposeDialog } from "@/components/compose-dialog";
 import {
-  CommandDialog,
-  CommandInput,
-  CommandList,
-  CommandEmpty,
-  CommandGroup,
-  CommandItem,
-} from "@/components/ui/command";
-import {
   ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
@@ -1199,8 +1191,6 @@ export function MailInterface({
   // ─── Local UI state ────────────────────────────────────────────────────
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>("");
-  const [searchInput, setSearchInput] = useState<string>("");
-  const [searchOpen, setSearchOpen] = useState(false);
   const [composeOpen, setComposeOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
@@ -1253,19 +1243,12 @@ export function MailInterface({
       }
       if ((e.metaKey || e.ctrlKey) && e.key === "k") {
         e.preventDefault();
-        setSearchOpen((prev) => !prev);
+        router.push("/search");
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, []);
-
-  // Reset search input when dialog opens
-  useEffect(() => {
-    if (searchOpen) {
-      setSearchInput(searchQuery);
-    }
-  }, [searchOpen, searchQuery]);
+  }, [router]);
 
   // ─── Derived state ─────────────────────────────────────────────────────
   const items: MailListItem[] = (() => {
@@ -1394,8 +1377,6 @@ export function MailInterface({
   onMailActionRef.current = onMailAction;
   const composeOpenRef = useRef(composeOpen);
   composeOpenRef.current = composeOpen;
-  const searchOpenRef = useRef(searchOpen);
-  searchOpenRef.current = searchOpen;
   const shortcutsOpenRef = useRef(shortcutsOpen);
   shortcutsOpenRef.current = shortcutsOpen;
   const setShortcutsOpenRef = useRef(setShortcutsOpen);
@@ -1414,7 +1395,7 @@ export function MailInterface({
         return;
       }
       // Don't fire shortcuts when dialogs are open
-      if (composeOpenRef.current || searchOpenRef.current) return;
+      if (composeOpenRef.current) return;
       const currentItems = itemsRef.current;
       if (!currentItems.length) return;
 
@@ -1484,7 +1465,7 @@ export function MailInterface({
         onClearCache={onClearCache}
         isRefreshing={refreshMutation.isPending}
         isClearing={clearCacheMutation.isPending}
-        onSearchOpen={() => setSearchOpen(true)}
+        onSearchOpen={() => router.push("/search")}
         shortcutsOpen={shortcutsOpen}
         onShortcutsOpenChange={setShortcutsOpen}
       />
@@ -1515,7 +1496,6 @@ export function MailInterface({
               searchQuery={searchQuery || undefined}
               onClearSearch={() => {
                 setSearchQuery("");
-                setSearchInput("");
               }}
               onArchive={(id) => onMailAction("archive", id)}
               onDelete={(id) => onMailAction("trash", id)}
@@ -1525,7 +1505,7 @@ export function MailInterface({
               onReplyAll={() => {}}
               onForward={() => {}}
               onCompose={() => setComposeOpen(true)}
-              onSearch={() => setSearchOpen(true)}
+              onSearch={() => router.push("/search")}
             />
           </div>
         </ResizablePanel>
@@ -1545,73 +1525,6 @@ export function MailInterface({
           />
         </ResizablePanel>
       </ResizablePanelGroup>
-
-      {/* Search dialog */}
-      <CommandDialog open={searchOpen} onOpenChange={setSearchOpen}>
-        <CommandInput
-          placeholder="Search mail... (supports Gmail syntax: from:, subject:, is:unread, has:attachment)"
-          value={searchInput}
-          onValueChange={setSearchInput}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && searchInput.trim()) {
-              setSearchQuery(searchInput.trim());
-              setSearchOpen(false);
-            }
-            if (e.key === "Escape") {
-              setSearchOpen(false);
-              if (searchQuery) {
-                setSearchQuery("");
-                setSearchInput("");
-              }
-            }
-          }}
-        />
-        <CommandList>
-          <CommandEmpty>
-            {searchInput
-              ? "Press Enter to search"
-              : "Type a search query (e.g. from:alice is:unread has:attachment)"}
-          </CommandEmpty>
-          <CommandGroup heading="Quick filters">
-            <CommandItem
-              onSelect={() => {
-                setSearchQuery("is:unread");
-                setSearchInput("is:unread");
-                setSearchOpen(false);
-              }}
-            >
-              Unread emails
-            </CommandItem>
-            <CommandItem
-              onSelect={() => {
-                setSearchQuery("has:attachment");
-                setSearchInput("has:attachment");
-                setSearchOpen(false);
-              }}
-            >
-              With attachments
-            </CommandItem>
-            <CommandItem
-              onSelect={() => {
-                setSearchQuery("is:starred");
-                setSearchInput("is:starred");
-                setSearchOpen(false);
-              }}
-            >
-              Starred emails
-            </CommandItem>
-            <CommandItem
-              onSelect={() => {
-                setSearchQuery("-label:inbox");
-                setSearchInput("-label:inbox");
-                setSearchOpen(false);
-              }}
-            >
-              Archived emails
-            </CommandItem>
-          </CommandGroup>
-        </CommandList>
-      </CommandDialog>
 
       {/* Compose dialog */}
       <ComposeDialog

@@ -14,6 +14,7 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 export async function GET(request: Request) {
   const tenantId = await getSessionTenantId();
   if (!tenantId) {
+    console.log("[suggestions] no tenantId - user not authenticated");
     return NextResponse.json({ suggestions: [] });
   }
 
@@ -27,6 +28,7 @@ export async function GET(request: Request) {
   // Check cache
   const cached = suggestionsCache.get(tenantId);
   if (cached && Date.now() - cached.at < CACHE_TTL) {
+    console.log("[suggestions] cache hit, contacts:", cached.data.length);
     const filtered = cached.data.filter(
       (s) =>
         s.email.toLowerCase().includes(query) ||
@@ -49,6 +51,8 @@ export async function GET(request: Request) {
       .map((m) => m.id)
       .filter((id): id is string => !!id);
 
+    console.log("[suggestions] sent messages found:", messageIds.length);
+
     if (messageIds.length === 0) {
       return NextResponse.json({ suggestions: [] });
     }
@@ -59,7 +63,7 @@ export async function GET(request: Request) {
     // Sample a subset to avoid too many API calls
     const sampleIds = messageIds.slice(0, 20);
 
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       sampleIds.map(async (id) => {
         try {
           const msg = await client.gmail.api.messages.get({
@@ -85,13 +89,19 @@ export async function GET(request: Request) {
               }
             }
           }
-        } catch {
-          // Skip failed fetches
+        } catch (err) {
+          console.error("[suggestions] failed to fetch message:", id, err);
         }
       }),
     );
 
+    const rejected = results.filter((r) => r.status === "rejected");
+    if (rejected.length > 0) {
+      console.log("[suggestions] rejected fetches:", rejected.length);
+    }
+
     const allContacts = Array.from(contacts.values());
+    console.log("[suggestions] contacts extracted:", allContacts.length);
 
     // Cache the results
     suggestionsCache.set(tenantId, { data: allContacts, at: Date.now() });
@@ -104,7 +114,8 @@ export async function GET(request: Request) {
     );
 
     return NextResponse.json({ suggestions: filtered.slice(0, 8) });
-  } catch {
+  } catch (err) {
+    console.error("[suggestions] error:", err);
     return NextResponse.json({ suggestions: [] });
   }
 }

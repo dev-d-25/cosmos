@@ -756,7 +756,7 @@ export function CalendarInterface({
       <CalendarTopNav
         onRefresh={handleRefresh}
         isRefreshing={isRefreshing}
-        onSearchOpen={() => {}}
+        onSearchOpen={() => router.push("/search")}
       />
 
       <div className="flex flex-1 overflow-hidden">

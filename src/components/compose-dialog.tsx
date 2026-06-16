@@ -12,8 +12,20 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { cn } from "@/lib/utils";
 import { RecipientInput } from "@/components/recipient-input";
+
+const DRAFT_STORAGE_KEY = "mail_compose_draft";
 
 interface ComposeAttachment {
   file: File;
@@ -53,6 +65,7 @@ export function ComposeDialog({
   const [draftId, setDraftId] = useState<string | null>(null);
   const [isSavingDraft, setIsSavingDraft] = useState(false);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [showDiscardDialog, setShowDiscardDialog] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const toInputRef = useRef<HTMLInputElement>(null);
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -81,15 +94,35 @@ export function ComposeDialog({
     }
   }, [open]);
 
-  // Reset fields when dialog opens with new data
+  // Reset fields when dialog opens, restore from session storage if available
   useEffect(() => {
     if (open) {
+      const saved = sessionStorage.getItem(DRAFT_STORAGE_KEY);
+      if (saved) {
+        try {
+          const draft = JSON.parse(saved);
+          setTo(draft.to || "");
+          setCc(draft.cc || "");
+          setBcc(draft.bcc || "");
+          setSubject(draft.subject || "");
+          setDraftId(draft.draftId || null);
+          setShowCc(!!draft.cc);
+          setShowBcc(!!draft.bcc);
+          if (editor) {
+            editor.commands.setContent(draft.html || "");
+          }
+          return;
+        } catch {
+          // Fall through to defaults
+        }
+      }
       setTo(initialTo);
       setCc("");
       setBcc("");
       setSubject(initialSubject);
       setShowCc(false);
       setShowBcc(false);
+      setDraftId(null);
       if (editor && initialBody) {
         editor.commands.setContent(initialBody);
       } else if (editor) {
@@ -134,10 +167,22 @@ export function ComposeDialog({
         });
         if (res.ok) {
           const data = await res.json();
-          if (data.id && !draftId) {
-            setDraftId(data.id);
+          const newDraftId = data.id && !draftId ? data.id : draftId;
+          if (newDraftId) {
+            setDraftId(newDraftId);
           }
           setHasUnsavedChanges(false);
+          sessionStorage.setItem(
+            DRAFT_STORAGE_KEY,
+            JSON.stringify({
+              draftId: newDraftId,
+              to,
+              cc: showCc ? cc : "",
+              bcc: showBcc ? bcc : "",
+              subject,
+              html: htmlBody,
+            }),
+          );
         }
       } catch {
         // Silent fail for auto-save
@@ -197,6 +242,69 @@ export function ComposeDialog({
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
+  const handleSaveDraft = useCallback(async () => {
+    if (isSavingDraft) return;
+    if (!to.trim() && !subject.trim() && !editor?.getHTML().replace(/<p><\/p>/g, "")) return;
+
+    setIsSavingDraft(true);
+    try {
+      const htmlBody = editor?.getHTML() || "";
+      const res = await fetch("/api/mail/draft", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: draftId ? "update" : "create",
+          draftId,
+          to,
+          cc: showCc ? cc : undefined,
+          bcc: showBcc ? bcc : undefined,
+          subject: subject || "(No subject)",
+          html: htmlBody,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const newDraftId = data.id && !draftId ? data.id : draftId;
+        if (newDraftId) {
+          setDraftId(newDraftId);
+        }
+        setHasUnsavedChanges(false);
+        sessionStorage.setItem(
+          DRAFT_STORAGE_KEY,
+          JSON.stringify({
+            draftId: newDraftId,
+            to,
+            cc: showCc ? cc : "",
+            bcc: showBcc ? bcc : "",
+            subject,
+            html: htmlBody,
+          }),
+        );
+      }
+    } catch {
+      // Silent fail for manual save
+    } finally {
+      setIsSavingDraft(false);
+    }
+  }, [isSavingDraft, to, cc, bcc, showCc, showBcc, subject, editor, draftId]);
+
+  const handleDiscardDraft = useCallback(async () => {
+    if (draftId) {
+      try {
+        await fetch("/api/mail/draft", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "delete", draftId }),
+        });
+      } catch {
+        // Silent fail
+      }
+    }
+    sessionStorage.removeItem(DRAFT_STORAGE_KEY);
+    setShowDiscardDialog(false);
+    onOpenChange(false);
+  }, [draftId, onOpenChange]);
+
   const handleSend = useCallback(async () => {
     if (!to.trim() || isSending) return;
     setIsSending(true);
@@ -245,6 +353,7 @@ export function ComposeDialog({
         return;
       }
 
+      sessionStorage.removeItem(DRAFT_STORAGE_KEY);
       onOpenChange(false);
     } catch (err) {
       console.error("Send error:", err);
@@ -415,8 +524,16 @@ export function ComposeDialog({
           </Button>
           <Button
             size="sm"
+            variant="outline"
+            onClick={handleSaveDraft}
+            disabled={isSavingDraft || (!to.trim() && !subject.trim())}
+          >
+            Save Draft
+          </Button>
+          <Button
+            size="sm"
             variant="ghost"
-            onClick={() => onOpenChange(false)}
+            onClick={() => setShowDiscardDialog(true)}
           >
             Discard
           </Button>
@@ -456,6 +573,21 @@ export function ComposeDialog({
           </div>
         </div>
       </DialogContent>
+
+      <AlertDialog open={showDiscardDialog} onOpenChange={setShowDiscardDialog}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete draft?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This draft will be permanently deleted from your Gmail.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>No</AlertDialogCancel>
+            <AlertDialogAction onClick={handleDiscardDraft}>Yes</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 }
