@@ -1,0 +1,540 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mail Sync Flow — Stubs, Enrichment & The Bugs</title>
+    <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+    <style>
+        :root {
+            --bg: #0d1117;
+            --card: #161b22;
+            --border: #30363d;
+            --text: #c9d1d9;
+            --accent: #58a6ff;
+            --green: #3fb950;
+            --red: #f85149;
+            --orange: #d29922;
+            --purple: #bc8cff;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.7;
+            padding: 2rem;
+        }
+        h1 { color: var(--accent); margin-bottom: 0.5rem; font-size: 1.8rem; }
+        h2 { color: var(--purple); margin: 2.5rem 0 1rem; font-size: 1.3rem; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        h3 { color: var(--green); margin: 1.5rem 0 0.5rem; font-size: 1.1rem; }
+        p, li { color: var(--text); margin-bottom: 0.5rem; }
+        code {
+            background: #1c2128;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 0.15em 0.4em;
+            font-size: 0.9em;
+            color: var(--orange);
+        }
+        pre {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1rem;
+            overflow-x: auto;
+            font-size: 0.85rem;
+            margin: 1rem 0;
+        }
+        pre code { border: none; padding: 0; background: none; color: var(--text); }
+        .mermaid {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin: 1rem 0;
+            display: flex;
+            justify-content: center;
+        }
+        .card {
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.2rem;
+            margin: 1rem 0;
+        }
+        .card.red { border-color: var(--red); }
+        .card.orange { border-color: var(--orange); }
+        .label {
+            display: inline-block;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            padding: 0.15em 0.6em;
+            border-radius: 4px;
+            margin-bottom: 0.5rem;
+        }
+        .label.stub { background: var(--red); color: #fff; }
+        .label.concept { background: var(--accent); color: #000; }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+        th, td {
+            border: 1px solid var(--border);
+            padding: 0.5rem 0.8rem;
+            text-align: left;
+            font-size: 0.85rem;
+        }
+        th { background: #1c2128; color: var(--accent); }
+        ul { padding-left: 1.5rem; margin: 0.5rem 0; }
+        li { margin-bottom: 0.3rem; }
+        .highlight { color: var(--orange); font-weight: 600; }
+        .bug { color: var(--red); font-weight: 600; }
+        .ok { color: var(--green); font-weight: 600; }
+    </style>
+</head>
+<body>
+
+<h1>How Your Mail App Fetches &amp; Displays Emails</h1>
+<p>A deep-dive into <strong>stubs</strong>, <strong>enrichment</strong>, and why emails disappear or show "unknown sender".</p>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>1. Key Concepts</h2>
+<!-- ═══════════════════════════════════════════════════════════════ -->
+
+<div class="card">
+    <span class="label concept">Concept</span>
+    <h3>What is a "Stub"?</h3>
+    <p>A <strong>stub</strong> is an incomplete record saved to the database. When your app calls Gmail's <code>messages.list</code> API, Gmail only returns <code>{ id, threadId }</code> for each email — just identifiers, nothing else. The corsair gmail plugin auto-saves these as stubs:</p>
+<pre><code>// gmail/endpoints/messages.ts — messages.list handler
+await ctx.db.messages.upsertByEntityId(message.id, {
+    ...message,        // only { id: "abc123", threadId: "def456" }
+    id: message.id,
+    createdAt: new Date(),
+});</code></pre>
+    <p>A stub in the database looks like this:</p>
+<pre><code>{
+    "id": "abc123",
+    "threadId": "def456",
+    "createdAt": "2026-06-16T17:00:00Z"
+    // NO "from"
+    // NO "subject"
+    // NO "internalDate"
+    // NO "labelIds"
+    // NO "payload"
+}</code></pre>
+    <p>When your UI tries to display this stub, it calls <code>toListItem()</code> which looks for <code>d.from</code> → undefined, then looks for <code>d.payload.headers["From"]</code> → no payload → falls back to <code>""</code> → UI shows <strong class="bug">"(unknown sender)"</strong>.</p>
+</div>
+
+<div class="card">
+    <span class="label concept">Concept</span>
+    <h3>What is "Enrichment"?</h3>
+    <p><strong>Enrichment</strong> is the process of filling in the missing data. After getting IDs from <code>messages.list</code>, your app calls <code>messages.get</code> (with <code>format: "metadata"</code>) for each message. This Gmail API call returns the full metadata including headers:</p>
+<pre><code>// server/mail/index.ts — syncLabelFromGmail()
+for (const id of needsEnrichment) {
+    await client.gmail.api.messages.get({
+        id,
+        format: "metadata",
+        metadataHeaders: ["Subject", "From", "To", "Date"],
+    });
+}</code></pre>
+    <p>The <code>messages.get</code> endpoint in the gmail plugin then saves a <strong>complete record</strong>:</p>
+<pre><code>// gmail/endpoints/messages.ts — messages.get handler
+await ctx.db.messages.upsertByEntityId(result.id, {
+    ...result,
+    subject: extractSubject(result),
+    body: extractBody(result),
+    from: extractFrom(result),
+    to: extractTo(result),
+    id: result.id,
+    createdAt: new Date(),
+});</code></pre>
+    <p>After enrichment, the database record looks like this:</p>
+<pre><code>{
+    "id": "abc123",
+    "threadId": "def456",
+    "from": "Dev Vaghela &lt;vagheladev25@gmail.com&gt;",
+    "subject": "helllo",
+    "internalDate": "1750094760000",
+    "labelIds": ["INBOX", "UNREAD"],
+    "snippet": "helllo",
+    "payload": { "headers": [...] },
+    "createdAt": "2026-06-16T17:00:00Z"
+}</code></pre>
+    <p>Now <code>toListItem()</code> finds <code>d.from</code> → the email address → UI shows the <strong class="ok">correct sender name</strong>.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>2. The Normal Flow (How It's Supposed to Work)</h2>
+<!-- ═══════════════════════════════════════════════════════════════ -->
+
+<div class="mermaid">
+sequenceDiagram
+    participant U as User Browser
+    participant SSR as Next.js SSR
+    participant API as /api/mail/threads
+    participant GAPI as Gmail API
+    participant DB as PostgreSQL DB
+
+    Note over U,DB: First Visit (no cache)
+
+    U->>SSR: Navigate to /mail
+    SSR->>API: getMailList(pageSize 25)
+    API->>DB: messages.list(limit 25)
+    DB-->>API: Empty (no cache yet)
+    API->>GAPI: messages.list(maxResults 25)
+    GAPI-->>API: 25 message IDs + threadIds
+
+    Note over API: Step A: messages.list auto-caches STUBS
+
+    loop For each message ID
+        API->>DB: upsertByEntityId with id, threadId only
+        Note over DB: STUB saved - no from, no internalDate
+    end
+
+    Note over API: Step B: Enrichment
+
+    loop For each message ID
+        API->>GAPI: messages.get(id, format metadata)
+        GAPI-->>API: id, from, subject, internalDate, payload.headers
+        API->>DB: upsertByEntityId with full data
+        Note over DB: ENRICHED record saved with from, subject, etc
+    end
+
+    API->>DB: messages.list(limit 25)
+    DB-->>API: 25 enriched messages
+    API-->>SSR: items array with correct data
+    SSR-->>U: HTML with correct sender names
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>3. Bug #1: Emails Disappearing After Refresh</h2>
+<!-- ═══════════════════════════════════════════════════════════════ -->
+
+<div class="card red">
+    <span class="label stub">Bug</span>
+    <h3>The Problem: No ORDER BY in the DB query</h3>
+    <p>The <code>db.messages.list()</code> function in <code>kysely/orm.ts</code> has <strong>no ORDER BY clause</strong>:</p>
+<pre><code>// kysely/orm.ts:282-288
+list: async (options) => {
+    let q = baseQuery(db, accountId, entityTypeName);
+    // NO .orderBy() anywhere!
+    if (typeof options?.limit === 'number') q = q.limit(options.limit);
+    if (typeof options?.offset === 'number') q = q.offset(options.offset);
+    const rows = await q.execute();
+    return rows.map(parseRow);
+},</code></pre>
+    <p>Without ORDER BY, PostgreSQL returns rows in <strong>heap order</strong> (roughly insertion order). This means the "first 25" are the 25 <em>oldest-inserted</em> rows, not the 25 <em>most recent emails</em>.</p>
+</div>
+
+<div class="mermaid">
+sequenceDiagram
+    participant DB as Database
+    participant CODE as getMailList
+
+    Note over DB,CODE: Visit 1 - First Load
+    Note over DB: DB starts empty
+
+    CODE->>DB: messages.list limit 25
+    Note over CODE: Cache empty so sync from Gmail
+    CODE->>DB: upsert 50 messages enriched
+    Note over DB: 50 enriched messages all created at same time
+
+    CODE->>DB: messages.list limit 25
+    DB-->>CODE: returns 25 of the 50
+    Note over CODE: sortByReceivedDesc sorts by internalDate and shows correct 25 emails
+
+    Note over DB,CODE: Visit 2 - After Refresh
+    Note over DB: DB has 50 enriched messages from Visit 1
+
+    CODE->>DB: messages.list limit 25
+    Note over CODE: Cache has data so SKIP sync and serve from cache
+
+    DB-->>CODE: returns 25 messages in HEAP ORDER
+    Note over DB: Heap order is not internalDate order. The 25 oldest-by-insertion are returned. Newer emails may be excluded.
+
+    CODE->>CODE: sortByReceivedDesc
+    Note over CODE: Sorts the 25 arbitrary rows but the WRONG 25 emails. Some recent emails MISSING.
+</div>
+
+<h3>Visual: What Happens in the Database</h3>
+
+<table>
+    <tr>
+        <th>DB Row</th>
+        <th>entity_id</th>
+        <th>data.from</th>
+        <th>data.internalDate</th>
+        <th>created_at</th>
+        <th>LIMIT 25?</th>
+    </tr>
+    <tr>
+        <td>1</td>
+        <td>msg_001</td>
+        <td>alice@gmail.com</td>
+        <td>10:00 AM</td>
+        <td>17:00:00 sync 1</td>
+        <td class="ok">Yes</td>
+    </tr>
+    <tr>
+        <td>2</td>
+        <td>msg_002</td>
+        <td>bob@gmail.com</td>
+        <td>09:30 AM</td>
+        <td>17:00:00 sync 1</td>
+        <td class="ok">Yes</td>
+    </tr>
+    <tr>
+        <td>...</td>
+        <td>...</td>
+        <td>...</td>
+        <td>...</td>
+        <td>...</td>
+        <td>...</td>
+    </tr>
+    <tr>
+        <td>25</td>
+        <td>msg_025</td>
+        <td>yuri@gmail.com</td>
+        <td>Yesterday</td>
+        <td>17:00:00 sync 1</td>
+        <td class="ok">Yes last in page</td>
+    </tr>
+    <tr style="background: #1c1208;">
+        <td>26</td>
+        <td>msg_026</td>
+        <td class="highlight">zara@gmail.com</td>
+        <td class="highlight">11:30 AM most recent</td>
+        <td>17:00:05 sync 1 inserted 5s later</td>
+        <td class="bug">NOT returned</td>
+    </tr>
+    <tr style="background: #1c1208;">
+        <td>27</td>
+        <td>msg_027</td>
+        <td class="highlight">your_friend@gmail.com</td>
+        <td class="highlight">11:28 AM</td>
+        <td>17:00:05 sync 1</td>
+        <td class="bug">NOT returned</td>
+    </tr>
+    <tr>
+        <td>...</td>
+        <td>...</td>
+        <td>...</td>
+        <td>...</td>
+        <td>...</td>
+        <td>...</td>
+    </tr>
+    <tr>
+        <td>50</td>
+        <td>msg_050</td>
+        <td>zzz@gmail.com</td>
+        <td>2 days ago</td>
+        <td>17:00:10 sync 2</td>
+        <td class="ok">Yes newly inserted at end</td>
+    </tr>
+</table>
+
+<p><strong>Row 26 and 27 have the most recent <code>internalDate</code> but are NOT in the first 25 by insertion order!</strong> The <code>messages.list</code> endpoint inserts messages as it processes them from the Gmail API response. Even though Gmail returns them sorted by date, the DB insert order may differ slightly, and after multiple syncs, the heap order diverges further from date order.</p>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>4. Bug #2: "(unknown sender)" on First Load</h2>
+<!-- ═══════════════════════════════════════════════════════════════ -->
+
+<div class="mermaid">
+sequenceDiagram
+    participant GAPI as Gmail API
+    participant PLUGIN as messages.list endpoint
+    participant DB as Database
+    participant SYNC as syncLabelFromGmail
+    participant UI as toListItem
+
+    Note over GAPI,UI: What happens during syncLabelFromGmail
+
+    SYNC->>GAPI: messages.list(maxResults 25)
+    GAPI-->>SYNC: array of id and threadId pairs
+
+    Note over PLUGIN: messages.list endpoint runs
+
+    loop For each message from Gmail
+        PLUGIN->>DB: upsert with id and threadId only
+        Note over DB: STUB saved with id and threadId only. No From field. No payload field.
+    end
+
+    Note over SYNC: Enrichment check
+
+    SYNC->>DB: findByEntityId
+    DB-->>SYNC: row with id and threadId
+    Note over SYNC: row.data.subject is undefined. row.data.from is undefined. Needs enrichment.
+
+    Note over SYNC: Enrichment
+
+    loop For each message needing enrichment
+        SYNC->>GAPI: messages.get with format metadata
+        GAPI-->>SYNC: id, payload with headers including From and Subject, internalDate
+        SYNC->>DB: upsert with id, from, internalDate and full data
+        Note over DB: ENRICHED record saved with from, internalDate, etc
+    end
+
+    Note over SYNC: After enrichment getMailList reads from DB
+
+    SYNC->>DB: messages.list limit 25
+    DB-->>SYNC: 25 messages all enriched now
+    SYNC->>UI: toListItem with from and internalDate
+    UI-->>UI: Shows correct sender name
+</div>
+
+<div class="card orange">
+    <span class="label" style="background: var(--orange); color: #000;">Edge Case</span>
+    <h3>When "(unknown sender)" Still Appears</h3>
+    <p>There are several scenarios where stubs survive without enrichment:</p>
+    <ul>
+        <li><strong>Enrichment failure:</strong> If <code>messages.get</code> fails for a message (rate limit, network error), <code>Promise.allSettled</code> swallows the error. That message stays as a stub.</li>
+        <li><strong>Partial sync:</strong> If Gmail returns 50 messages but only 25 are enriched (the page size), messages 26-50 remain as stubs. If they appear in a later page, they show "(unknown sender)".</li>
+        <li><strong>Stale cache:</strong> On refresh, if the cache has enough messages, <code>getMailList</code> serves from cache WITHOUT re-syncing. If some of those cached messages are stubs from a partial previous sync, they show "(unknown sender)".</li>
+        <li><strong>Race condition:</strong> The <code>messages.list</code> auto-cache creates stubs, then enrichment updates them. If the DB read happens between these two operations (unlikely but possible with concurrent requests), stubs are returned.</li>
+    </ul>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>5. The Page Size Mismatch</h2>
+<!-- ═══════════════════════════════════════════════════════════════ -->
+
+<div class="card orange">
+    <span class="label" style="background: var(--orange); color: #000;">Additional Issue</span>
+    <h3>SSR fetches 50, Client fetches 25</h3>
+    <p>In <code>page.tsx</code>, the server-side rendering fetches with <code>pageSize: 50</code>:</p>
+<pre><code>// page.tsx - getMailPageData()
+const [list, profile, labels] = await Promise.all([
+    getMailList({ pageIndex: 0, pageSize: 50, ... }),  // 50 items
+    ...
+]);</code></pre>
+    <p>But in <code>_client.tsx</code>, the client-side query uses <code>pageSize: 25</code>:</p>
+<pre><code>// _client.tsx
+const threadsQuery = useMailThreads({
+    page: pageIndex,
+    pageSize: 25,   // Different from SSR!
+    ...
+    initialData: initial.list,  // Data from pageSize: 50
+});</code></pre>
+    <p>This means the <strong>query keys are different</strong>. TanStack Query treats them as separate queries. The SSR data is passed as <code>initialData</code> but the client immediately fetches with <code>pageSize: 25</code>, triggering a new server request.</p>
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>6. Complete Picture: All the Moving Parts</h2>
+<!-- ═══════════════════════════════════════════════════════════════ -->
+
+<div class="mermaid">
+graph TB
+    U1[User opens /mail]
+    U2[User refreshes page]
+    U3[User clicks Refresh button]
+
+    S1[getMailPageData]
+    S2[getMailList pageSize 50]
+
+    C1[useMailThreads pageSize 25]
+    C2[fetch /api/mail/threads pageSize 25]
+
+    A1[getMailList pageSize 25]
+
+    G1{Cache has enough data?}
+    G2[Serve from cache - no Gmail API call]
+    G3[syncLabelFromGmail]
+    G4[messages.list from Gmail]
+    G5[Auto-cache STUBS]
+    G6[Enrich with messages.get]
+    G7[Read from DB messages.list limit 25]
+
+    B1[Bug No ORDER BY - arbitrary 25 returned]
+    B2[Bug Stubs survive - unknown sender]
+
+    UI[UI Render]
+
+    U1 --> S1
+    S1 --> S2
+    S2 --> A1
+    U2 --> S1
+    U3 --> C1
+    C1 --> C2
+    C2 --> A1
+
+    A1 --> G1
+    G1 -->|Yes cache hit| G2
+    G2 --> B1
+    G1 -->|No cache miss| G3
+    G3 --> G4
+    G4 --> G5
+    G5 --> G6
+    G6 --> G7
+    G7 --> B1
+    G5 -.->|Stubs survive if enrichment fails| B2
+
+    B1 -->|Returns wrong 25| UI
+    B2 -->|from is empty| UI
+
+    style B1 fill:#f85149,color:#fff
+    style B2 fill:#d29922,color:#000
+    style UI fill:#58a6ff,color:#000
+</div>
+
+<!-- ═══════════════════════════════════════════════════════════════ -->
+<h2>7. Summary of All Issues</h2>
+<!-- ═══════════════════════════════════════════════════════════════ -->
+
+<table>
+    <tr>
+        <th>Issue</th>
+        <th>Root Cause</th>
+        <th>Where</th>
+        <th>Fix Needed</th>
+    </tr>
+    <tr>
+        <td class="bug">Emails disappear after refresh</td>
+        <td><code>db.messages.list()</code> has no ORDER BY — returns arbitrary rows by insertion time, not by email date</td>
+        <td><code>kysely/orm.ts:282-288</code></td>
+        <td>Add ORDER BY on the DB query, or sort in SQL by a JSONB field like <code>data->>'internalDate'</code></td>
+    </tr>
+    <tr>
+        <td class="bug">"(unknown sender)" on first load</td>
+        <td><code>messages.list</code> auto-caches stubs without <code>from</code>. Enrichment updates them, but stubs can survive if enrichment fails or hasn't completed.</td>
+        <td><code>gmail/endpoints/messages.ts:97-111</code><br/><code>server/mail/index.ts:100-108</code></td>
+        <td>Remove auto-cache from <code>messages.list</code>, or filter out stubs (no <code>from</code>) from DB reads, or ensure enrichment always completes</td>
+    </tr>
+    <tr>
+        <td class="highlight">Page size mismatch</td>
+        <td>SSR uses pageSize 50, client uses pageSize 25 — different query keys cause unnecessary refetch</td>
+        <td><code>page.tsx:14</code> vs <code>_client.tsx:1216</code></td>
+        <td>Make page sizes consistent</td>
+    </tr>
+    <tr>
+        <td class="highlight">Auto-cache stubs from messages.list</td>
+        <td><code>messages.list</code> endpoint saves stubs with only <code>{id, threadId}</code> — pollutes the cache with incomplete data</td>
+        <td><code>gmail/endpoints/messages.ts:97-111</code></td>
+        <td>Don't auto-cache from <code>messages.list</code>, or at minimum include extracted fields</td>
+    </tr>
+</table>
+
+<script>
+    mermaid.initialize({
+        startOnLoad: true,
+        theme: 'dark',
+        themeVariables: {
+            primaryColor: '#58a6ff',
+            primaryTextColor: '#c9d1d9',
+            primaryBorderColor: '#30363d',
+            lineColor: '#58a6ff',
+            secondaryColor: '#161b22',
+            tertiaryColor: '#0d1117',
+            fontFamily: '-apple-system, BlinkMacSystemFont, Segoe UI, Helvetica, Arial, sans-serif',
+            fontSize: '14px',
+        },
+        flowchart: { curve: 'basis' },
+        sequence: { mirrorActors: false, actorMargin: 50 },
+    });
+</script>
+
+</body>
+</html>
