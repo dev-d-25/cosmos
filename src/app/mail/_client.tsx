@@ -55,6 +55,8 @@ import {
   useClearMailCache,
 } from "@/hooks/use-mail";
 import { markAsReadLocally, isReadLocally } from "@/lib/read-emails";
+import type { MailSyncedState as SyncedState } from "@/types/mail";
+import { initialsOf, formatReceived } from "@/lib/mail/format";
 
 // ─── Label definitions ──────────────────────────────────────────────────────
 
@@ -285,36 +287,6 @@ function MailTag({ children }: { children: ReactNode }) {
   );
 }
 
-function initialsOf(s: string): string {
-  const trimmed = s.trim();
-  if (!trimmed) return "?";
-  const local = trimmed.includes("@") ? trimmed.split("@")[0]! : trimmed;
-  const parts = local.split(/[ ._<>]+/).filter(Boolean);
-  if (parts.length === 0) return local.slice(0, 2).toUpperCase();
-  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
-  return (parts[0]![0]! + parts[1]![0]!).toUpperCase();
-}
-
-function formatReceived(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  const now = new Date();
-  const sameDay = d.toDateString() === now.toDateString();
-  if (sameDay) {
-    const hh = String(d.getHours()).padStart(2, "0");
-    const mm = String(d.getMinutes()).padStart(2, "0");
-    return `${hh}:${mm}`;
-  }
-  const months = [
-    "Jan","Feb","Mar","Apr","May","Jun",
-    "Jul","Aug","Sep","Oct","Nov","Dec",
-  ];
-  const mon = months[d.getMonth()];
-  const day = d.getDate();
-  const sameYear = d.getFullYear() === now.getFullYear();
-  return sameYear ? `${mon} ${day}` : `${mon} ${day}, ${d.getFullYear()}`;
-}
-
 // ─── Sidebar ────────────────────────────────────────────────────────────────
 
 function MailSidebar({
@@ -441,8 +413,6 @@ function ProfileDropdown({ profile }: { profile: { emailAddress?: string; name?:
 }
 
 // ─── Top Nav ────────────────────────────────────────────────────────────────
-
-type SyncedState = "Not connected" | "No mail cached" | "Synced" | "Loading...";
 
 function MailTopNav({
   syncedState,
