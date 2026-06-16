@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import Link from "next/link";
+import { usePathname } from "next/navigation";
 import {
   ChevronDown,
   Mail,
@@ -27,19 +28,18 @@ type User = {
 };
 
 const modes = [
-  { id: "mail", label: "Mail", icon: Mail },
-  { id: "calendar", label: "Calendar", icon: Calendar },
-  { id: "agent", label: "Agent", icon: Bot },
+  { id: "mail", label: "Mail", icon: Mail, href: "/mail" },
+  { id: "calendar", label: "Calendar", icon: Calendar, href: "/calendar" },
+  { id: "agent", label: "Agent", icon: Bot, href: "/agent" },
 ] as const;
-
-type ModeId = (typeof modes)[number]["id"];
 
 interface TopNavProps {
   user: User;
 }
 
 export function TopNav({ user }: TopNavProps) {
-  const [activeMode, setActiveMode] = useState<ModeId>("mail");
+  const pathname = usePathname();
+  const activeMode = modes.find((m) => pathname.startsWith(m.href))?.id ?? "mail";
 
   return (
     <header className="flex h-14 shrink-0 items-center border-b border-border bg-background px-4 gap-4">
@@ -77,9 +77,9 @@ export function TopNav({ user }: TopNavProps) {
           const Icon = mode.icon;
           const isActive = activeMode === mode.id;
           return (
-            <button
+            <Link
               key={mode.id}
-              onClick={() => setActiveMode(mode.id)}
+              href={mode.href}
               className={cn(
                 "relative flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium transition-colors rounded-md",
                 isActive
@@ -92,7 +92,7 @@ export function TopNav({ user }: TopNavProps) {
               {isActive && (
                 <span className="absolute bottom-0 left-2 right-2 h-0.5 rounded-full bg-primary" />
               )}
-            </button>
+            </Link>
           );
         })}
       </nav>
