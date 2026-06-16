@@ -2,7 +2,7 @@
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { MailListResponseSchema, MailMessageSchema, MailLabelsResponseSchema } from "@/server/mail/schemas";
-import type { MailListResponse, MailMessage, MailLabel, MailProfile } from "@/server/mail/types";
+import type { MailListResponse, MailMessage, MailLabel, MailProfile } from "@/server/mail/schemas";
 
 // ─── API fetchers ──────────────────────────────────────────────────────────────
 

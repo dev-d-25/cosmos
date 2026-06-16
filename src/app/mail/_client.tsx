@@ -31,6 +31,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip
 import { ShortcutsHelp } from "@/components/shortcuts-help";
 import { CommandIcon, SquarePenIcon, StarIcon } from "lucide-react";
 import { ComposeDialog } from "@/components/compose-dialog";
+import { useMailShortcuts } from "@/hooks/use-mail-shortcuts";
 import {
   ResizableHandle,
   ResizablePanel,
@@ -44,7 +45,7 @@ import type {
   MailMessage,
   MailPageData,
   MailProfile,
-} from "@/server/mail/types";
+} from "@/server/mail/schemas";
 import {
   useMailThreads,
   useMailMessage,
@@ -205,13 +206,7 @@ const LABEL_DEFS: LabelDef[] = [
   },
 ];
 
-function getGmailParamsForView(view: string): { labelIds?: string[]; query?: string } {
-  const def = LABEL_DEFS.find((l) => l.id === view);
-  if (!def) return {};
-  if (def.gmailQuery) return { query: def.gmailQuery };
-  if (def.gmailLabel) return { labelIds: [def.gmailLabel] };
-  return {};
-}
+import { getGmailParamsForView } from "@/lib/mail/labels";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -1365,96 +1360,17 @@ export function MailInterface({
   );
 
   // ─── Keyboard shortcuts ────────────────────────────────────────────────
-  const itemsRef = useRef(items);
-  itemsRef.current = items;
-  const selectedIdRef = useRef(selectedId);
-  selectedIdRef.current = selectedId;
-  const onOpenRef = useRef(onOpen);
-  onOpenRef.current = onOpen;
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  const onMailActionRef = useRef(onMailAction);
-  onMailActionRef.current = onMailAction;
-  const composeOpenRef = useRef(composeOpen);
-  composeOpenRef.current = composeOpen;
-  const shortcutsOpenRef = useRef(shortcutsOpen);
-  shortcutsOpenRef.current = shortcutsOpen;
-  const setShortcutsOpenRef = useRef(setShortcutsOpen);
-  setShortcutsOpenRef.current = setShortcutsOpen;
-
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.metaKey || event.ctrlKey || event.altKey) return;
-      const target = event.target as HTMLElement | null;
-      if (
-        target &&
-        (target.tagName === "INPUT" ||
-          target.tagName === "TEXTAREA" ||
-          target.isContentEditable)
-      ) {
-        return;
-      }
-      // Don't fire shortcuts when dialogs are open
-      if (composeOpenRef.current) return;
-      const currentItems = itemsRef.current;
-      if (!currentItems.length) return;
-
-      const currentSelectedId = selectedIdRef.current;
-
-      if (event.key === "j" || event.key === "ArrowDown") {
-        event.preventDefault();
-        setSelectedId((current) => {
-          const idx = current ? currentItems.findIndex((i) => i.id === current) : -1;
-          const next = currentItems[Math.min(currentItems.length - 1, idx + 1)];
-          return next?.id ?? current;
-        });
-      } else if (event.key === "k" || event.key === "ArrowUp") {
-        event.preventDefault();
-        setSelectedId((current) => {
-          if (!current) return currentItems[currentItems.length - 1]?.id ?? null;
-          const idx = currentItems.findIndex((i) => i.id === current);
-          const next = currentItems[Math.max(0, idx - 1)];
-          return next?.id ?? current;
-        });
-      } else if (event.key === "Enter" || event.key === "o") {
-        if (currentSelectedId) {
-          event.preventDefault();
-          onOpenRef.current(currentSelectedId);
-        }
-      } else if (event.key === "Escape") {
-        if (currentSelectedId) {
-          event.preventDefault();
-          onCloseRef.current();
-        }
-      } else if (event.key === "e" && currentSelectedId) {
-        event.preventDefault();
-        onMailActionRef.current("archive", currentSelectedId);
-      } else if (event.key === "#" && currentSelectedId) {
-        event.preventDefault();
-        onMailActionRef.current("trash", currentSelectedId);
-      } else if (event.key === "s" && currentSelectedId) {
-        event.preventDefault();
-        onMailActionRef.current("star", currentSelectedId);
-      } else if (event.key === "u" && currentSelectedId) {
-        event.preventDefault();
-        onMailActionRef.current("markUnread", currentSelectedId);
-      } else if (event.key === "r" && currentSelectedId) {
-        event.preventDefault();
-        // TODO: open reply compose
-      } else if (event.key === "f" && currentSelectedId) {
-        event.preventDefault();
-        // TODO: open forward compose
-      } else if (event.key === "l" && currentSelectedId) {
-        event.preventDefault();
-        // TODO: open label picker
-      } else if (event.key === "?") {
-        event.preventDefault();
-        setShortcutsOpenRef.current(true);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  useMailShortcuts({
+    items,
+    selectedId,
+    setSelectedId,
+    onOpen,
+    onClose,
+    onMailAction,
+    composeOpen,
+    shortcutsOpen,
+    setShortcutsOpen,
+  });
 
   return (
     <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">

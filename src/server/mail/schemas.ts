@@ -87,3 +87,14 @@ export type MailMessage = z.infer<typeof MailMessageSchema>;
 export type MailLabel = z.infer<typeof MailLabelSchema>;
 export type MailProfile = z.infer<typeof MailProfileSchema>;
 export type MailListResponse = z.infer<typeof MailListResponseSchema>;
+
+export type MailPageData =
+  | { tenantId: string; gmailConnected: false }
+  | {
+      tenantId: string;
+      gmailConnected: true;
+      view: string;
+      list: MailListResponse;
+      profile: MailProfile | null;
+      labels: MailLabel[];
+    };

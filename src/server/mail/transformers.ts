@@ -1,4 +1,4 @@
-import type { MailAttachment, MailListItem, MailMessage } from "./types";
+import type { MailAttachment, MailListItem, MailMessage } from "./schemas";
 
 export function getHeader(
   headers: { name?: string; value?: string }[] | undefined,

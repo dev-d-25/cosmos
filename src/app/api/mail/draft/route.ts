@@ -1,15 +1,8 @@
 import { NextResponse } from "next/server";
 import { AuthMissingError } from "corsair/core";
-import { getSessionTenantId } from "@/server/auth";
-import { corsair } from "@/server/corsair";
-import { buildEncodedMimeMessage } from "@/server/mail/mime";
+import { createDraft, updateDraft, deleteDraft } from "@/server/mail";
 
 export async function POST(request: Request) {
-  const tenantId = await getSessionTenantId();
-  if (!tenantId) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
   try {
     const body = await request.json();
     const { action, draftId, to, cc, bcc, subject, html } = body as {
@@ -22,38 +15,26 @@ export async function POST(request: Request) {
       html?: string;
     };
 
-    const client = corsair.withTenant(tenantId);
+    const params = { to, cc, bcc, subject, html };
 
     switch (action) {
-      case "create":
+      case "create": {
+        const result = await createDraft(params);
+        return NextResponse.json(result);
+      }
       case "update": {
-        const raw = buildEncodedMimeMessage({
-          to: to ? to.split(",").map((e) => e.trim()).filter(Boolean) : [],
-          cc: cc ? cc.split(",").map((e) => e.trim()).filter(Boolean) : undefined,
-          bcc: bcc ? bcc.split(",").map((e) => e.trim()).filter(Boolean) : undefined,
-          subject: subject || "(No subject)",
-          html: html || "",
-        });
-
-        if (action === "update" && draftId) {
-          const result = await client.gmail.api.drafts.update({
-            id: draftId,
-            draft: { message: { raw } },
-          });
-          return NextResponse.json({ id: draftId, ...result });
+        if (!draftId) {
+          return NextResponse.json({ error: "draftId required" }, { status: 400 });
         }
-
-        const result = await client.gmail.api.drafts.create({
-          draft: { message: { raw } },
-        });
-        return NextResponse.json({ id: (result as { id?: string }).id || "" });
+        const result = await updateDraft(draftId, params);
+        return NextResponse.json(result);
       }
       case "delete": {
         if (!draftId) {
           return NextResponse.json({ error: "draftId required" }, { status: 400 });
         }
-        await client.gmail.api.drafts.delete({ id: draftId });
-        return NextResponse.json({ ok: true });
+        const result = await deleteDraft(draftId);
+        return NextResponse.json(result);
       }
       default:
         return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });

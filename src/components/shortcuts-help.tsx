@@ -8,55 +8,7 @@ import {
 } from "@/components/ui/popover";
 import { Kbd } from "@/components/ui/kbd";
 import { CommandIcon } from "lucide-react";
-
-interface ShortcutGroup {
-  title: string;
-  shortcuts: { keys: string[]; description: string }[];
-}
-
-const SHORTCUT_GROUPS: ShortcutGroup[] = [
-  {
-    title: "Navigation",
-    shortcuts: [
-      { keys: ["J"], description: "Next email" },
-      { keys: ["K"], description: "Previous email" },
-      { keys: ["Enter"], description: "Open email" },
-      { keys: ["Esc"], description: "Close / Back" },
-      { keys: ["G", "I"], description: "Go to Inbox" },
-      { keys: ["G", "D"], description: "Go to Drafts" },
-      { keys: ["G", "T"], description: "Go to Sent" },
-      { keys: ["G", "A"], description: "Go to Archive" },
-    ],
-  },
-  {
-    title: "Actions",
-    shortcuts: [
-      { keys: ["E"], description: "Archive" },
-      { keys: ["#"], description: "Delete" },
-      { keys: ["S"], description: "Star" },
-      { keys: ["U"], description: "Mark unread" },
-      { keys: ["R"], description: "Reply" },
-      { keys: ["A"], description: "Reply all" },
-      { keys: ["F"], description: "Forward" },
-      { keys: ["L"], description: "Add label" },
-    ],
-  },
-  {
-    title: "Search",
-    shortcuts: [
-      { keys: ["⌘", "K"], description: "Open search" },
-      { keys: ["/"], description: "Focus search" },
-    ],
-  },
-  {
-    title: "Composing",
-    shortcuts: [
-      { keys: ["C"], description: "Compose new" },
-      { keys: ["⌘", "Enter"], description: "Send email" },
-      { keys: ["⌘", "Shift", "P"], description: "Pop out compose" },
-    ],
-  },
-];
+import { SHORTCUT_GROUPS, type ShortcutGroup } from "@/hooks/use-mail-shortcuts";
 
 function ShortcutKeys({ keys }: { keys: string[] }) {
   return (

@@ -15,12 +15,41 @@ import type {
   MailListResponse,
   MailPageData,
   MailProfile,
-} from "./types";
+} from "./schemas";
+import { MAIL_LABEL_MAP } from "@/lib/mail/labels";
 
 const INBOX_LABEL = "INBOX";
 const DEFAULT_PAGE_SIZE = 50;
 const ENRICH_CONCURRENCY = 10;
 const CACHE_PAGE_TOKEN_PREFIX = "cache:";
+
+async function enrichStubs(
+  client: ReturnType<typeof corsair.withTenant>,
+  ids: string[],
+): Promise<void> {
+  const needsEnrichment: string[] = [];
+  for (const id of ids) {
+    const row = await client.gmail.db.messages.findByEntityId(id);
+    if (!row?.data?.subject || !row?.data?.from) {
+      needsEnrichment.push(id);
+    }
+  }
+  const chunks: string[][] = [];
+  for (let i = 0; i < needsEnrichment.length; i += ENRICH_CONCURRENCY) {
+    chunks.push(needsEnrichment.slice(i, i + ENRICH_CONCURRENCY));
+  }
+  for (const chunk of chunks) {
+    await Promise.allSettled(
+      chunk.map((id) =>
+        client.gmail.api.messages.get({
+          id,
+          format: "metadata",
+          metadataHeaders: ["Subject", "From", "To", "Date"],
+        }),
+      ),
+    );
+  }
+}
 
 function isCachePageToken(token: string | null | undefined): boolean {
   return typeof token === "string" && token.startsWith(CACHE_PAGE_TOKEN_PREFIX);
@@ -97,33 +126,7 @@ async function syncLabelFromGmail(
     return { nextPageToken: null };
   }
 
-  // Check which messages already have enriched data (subject + from) in the DB cache.
-  // Use findByEntityId for each ID to get the exact rows we need, not a generic list.
-  const needsEnrichment: string[] = [];
-  for (const id of ids) {
-    const row = await client.gmail.db.messages.findByEntityId(id);
-    if (!row?.data?.subject || !row?.data?.from) {
-      needsEnrichment.push(id);
-    }
-  }
-
-  // Enrich with format:"metadata" — only fetches headers (Subject, From, To).
-  // This is ~10x faster than format:"full" which downloads the entire MIME tree.
-  const chunks: string[][] = [];
-  for (let i = 0; i < needsEnrichment.length; i += ENRICH_CONCURRENCY) {
-    chunks.push(needsEnrichment.slice(i, i + ENRICH_CONCURRENCY));
-  }
-  for (const chunk of chunks) {
-    await Promise.allSettled(
-      chunk.map((id) =>
-        client.gmail.api.messages.get({
-          id,
-          format: "metadata",
-          metadataHeaders: ["Subject", "From", "To", "Date"],
-        }),
-      ),
-    );
-  }
+  await enrichStubs(client, ids);
 
   return {
     nextPageToken:
@@ -146,7 +149,6 @@ export async function getMailList(
 
   const isQueryMode = !!opts.q;
   const labelIds = opts.labelIds ?? (isQueryMode ? [] : [INBOX_LABEL]);
-
   const pageSize = Math.min(
     100,
     Math.max(1, Math.floor(opts.pageSize ?? DEFAULT_PAGE_SIZE)),
@@ -156,104 +158,104 @@ export async function getMailList(
     typeof opts.pageToken === "string" &&
     opts.pageToken.length > 0 &&
     !isCachePageToken(opts.pageToken);
-
   const isFilteredLabel =
     labelIds.length > 0 && labelIds[0] !== INBOX_LABEL;
 
-  // ── Query mode (search / archive): always call Gmail API, no local filter ──
   if (isQueryMode && !cacheTokenPage) {
-    const apiResult = await ctx.client.gmail.api.messages.list({
-      userId: "me",
-      maxResults: pageSize,
-      pageToken: opts.pageToken ?? undefined,
-      q: opts.q!,
-      includeSpamTrash: true,
-    });
-
-    const ids = (apiResult.messages ?? [])
-      .map((m) => m.id)
-      .filter((id): id is string => !!id);
-
-    if (ids.length === 0) {
-      return { items: [], nextPageToken: null, source: "live" };
-    }
-
-    // Enrich any stubs missing subject/from
-    const needsEnrichment: string[] = [];
-    for (const id of ids) {
-      const row = await ctx.client.gmail.db.messages.findByEntityId(id);
-      if (!row?.data?.subject || !row?.data?.from) {
-        needsEnrichment.push(id);
-      }
-    }
-    const chunks: string[][] = [];
-    for (let i = 0; i < needsEnrichment.length; i += ENRICH_CONCURRENCY) {
-      chunks.push(needsEnrichment.slice(i, i + ENRICH_CONCURRENCY));
-    }
-    for (const chunk of chunks) {
-      await Promise.allSettled(
-        chunk.map((id) =>
-          ctx.client.gmail.api.messages.get({
-            id,
-            format: "metadata",
-            metadataHeaders: ["Subject", "From", "To", "Date"],
-          }),
-        ),
-      );
-    }
-
-    // Read enriched rows back by ID
-    const items: MailListItem[] = [];
-    for (const id of ids) {
-      const row = await ctx.client.gmail.db.messages.findByEntityId(id);
-      if (row) {
-        const item = toListItem(row);
-        if (item.id) items.push(item);
-      }
-    }
-
-    return {
-      items,
-      nextPageToken: apiResult.nextPageToken ?? null,
-      source: "live",
-    };
+    return getMailListFromQuery(ctx.client, opts, pageSize, labelIds);
   }
-
-  // ── Cache-only page (via "cache:N" token). No API call. ──────────────
   if (cacheTokenPage !== null) {
-    const limit = (cacheTokenPage + 1) * pageSize;
-    const cacheLimit = isFilteredLabel ? limit * 10 : limit;
-    let cachedAll = await ctx.client.gmail.db.messages.list({
-      limit: cacheLimit,
-      offset: 0,
-    });
-    if (cachedAll.length === 0) {
-      return { items: [], nextPageToken: null, source: "cache" };
-    }
-    let cacheFiltered = isFilteredLabel
-      ? filterByLabel(cachedAll, labelIds)
-      : cachedAll;
-    const page = sortByReceivedDesc(rowsToListItems(cacheFiltered)).slice(
-      cacheTokenPage * pageSize,
-      (cacheTokenPage + 1) * pageSize,
-    );
-    const hasMore = cacheFiltered.length > (cacheTokenPage + 1) * pageSize;
-    return {
-      items: page,
-      nextPageToken: hasMore ? makeCachePageToken(cacheTokenPage + 1) : null,
-      source: "cache",
-    };
+    return getMailListFromCachePage(ctx.client, cacheTokenPage, pageSize, labelIds, isFilteredLabel);
+  }
+  return getMailListFromNormal(ctx.client, opts, pageSize, labelIds, hasGmailToken, isFilteredLabel);
+}
+
+async function getMailListFromQuery(
+  client: ReturnType<typeof corsair.withTenant>,
+  opts: { pageToken?: string | null; q?: string },
+  pageSize: number,
+  labelIds: string[],
+): Promise<MailListResponse> {
+  const apiResult = await client.gmail.api.messages.list({
+    userId: "me",
+    maxResults: pageSize,
+    pageToken: opts.pageToken ?? undefined,
+    q: opts.q!,
+    includeSpamTrash: true,
+  });
+
+  const ids = (apiResult.messages ?? [])
+    .map((m) => m.id)
+    .filter((id): id is string => !!id);
+
+  if (ids.length === 0) {
+    return { items: [], nextPageToken: null, source: "live" };
   }
 
+  await enrichStubs(client, ids);
+
+  const items: MailListItem[] = [];
+  for (const id of ids) {
+    const row = await client.gmail.db.messages.findByEntityId(id);
+    if (row) {
+      const item = toListItem(row);
+      if (item.id) items.push(item);
+    }
+  }
+
+  return {
+    items,
+    nextPageToken: apiResult.nextPageToken ?? null,
+    source: "live",
+  };
+}
+
+async function getMailListFromCachePage(
+  client: ReturnType<typeof corsair.withTenant>,
+  cacheTokenPage: number,
+  pageSize: number,
+  labelIds: string[],
+  isFilteredLabel: boolean,
+): Promise<MailListResponse> {
+  const limit = (cacheTokenPage + 1) * pageSize;
+  const cacheLimit = isFilteredLabel ? limit * 10 : limit;
+  let cachedAll = await client.gmail.db.messages.list({
+    limit: cacheLimit,
+    offset: 0,
+  });
+  if (cachedAll.length === 0) {
+    return { items: [], nextPageToken: null, source: "cache" };
+  }
+  let cacheFiltered = isFilteredLabel
+    ? filterByLabel(cachedAll, labelIds)
+    : cachedAll;
+  const page = sortByReceivedDesc(rowsToListItems(cacheFiltered)).slice(
+    cacheTokenPage * pageSize,
+    (cacheTokenPage + 1) * pageSize,
+  );
+  const hasMore = cacheFiltered.length > (cacheTokenPage + 1) * pageSize;
+  return {
+    items: page,
+    nextPageToken: hasMore ? makeCachePageToken(cacheTokenPage + 1) : null,
+    source: "cache",
+  };
+}
+
+async function getMailListFromNormal(
+  client: ReturnType<typeof corsair.withTenant>,
+  opts: { pageIndex?: number; pageToken?: string | null; force?: boolean; q?: string },
+  pageSize: number,
+  labelIds: string[],
+  hasGmailToken: boolean,
+  isFilteredLabel: boolean,
+): Promise<MailListResponse> {
   const pageIndex = Math.max(0, Math.floor(opts.pageIndex ?? 0));
   const offset = pageIndex * pageSize;
   const totalNeeded = offset + pageSize;
 
-  // ── Try to serve from corsair's DB cache ─────────────────────────────
   if (!opts.force && !hasGmailToken) {
-    // Load enough rows from DB. For filtered labels, load extra since many won't match.
     const cacheLoadLimit = isFilteredLabel ? totalNeeded * 10 : totalNeeded;
-    const cachedAll = await ctx.client.gmail.db.messages.list({
+    const cachedAll = await client.gmail.db.messages.list({
       limit: cacheLoadLimit,
       offset: 0,
     });
@@ -283,12 +285,11 @@ export async function getMailList(
     }
   }
 
-  // ── Cache miss: sync from Gmail API, then read from DB ──────────────
   let nextToken: string | null = null;
 
   if (pageIndex === 0) {
     const { nextPageToken } = await syncLabelFromGmail(
-      ctx.client,
+      client,
       totalNeeded,
       labelIds,
       opts.q,
@@ -296,7 +297,7 @@ export async function getMailList(
     if (nextPageToken) {
       nextToken = nextPageToken;
     } else if (!isFilteredLabel) {
-      const total = await ctx.client.gmail.db.messages.count();
+      const total = await client.gmail.db.messages.count();
       if (total > (pageIndex + 1) * pageSize) {
         nextToken = makeCachePageToken(pageIndex + 1);
       }
@@ -305,7 +306,7 @@ export async function getMailList(
     if (!hasGmailToken) {
       return { items: [], nextPageToken: null, source: "cache" };
     }
-    const apiResult = await ctx.client.gmail.api.messages.list({
+    const apiResult = await client.gmail.api.messages.list({
       userId: "me",
       maxResults: pageSize,
       pageToken: opts.pageToken!,
@@ -318,28 +319,12 @@ export async function getMailList(
       .filter((id): id is string => !!id);
 
     if (ids.length > 0) {
-      // Enrich new stubs with metadata format (headers only).
-      const chunks: string[][] = [];
-      for (let i = 0; i < ids.length; i += ENRICH_CONCURRENCY) {
-        chunks.push(ids.slice(i, i + ENRICH_CONCURRENCY));
-      }
-      for (const chunk of chunks) {
-        await Promise.allSettled(
-          chunk.map((id) =>
-            ctx.client.gmail.api.messages.get({
-              id,
-              format: "metadata",
-              metadataHeaders: ["Subject", "From", "To", "Date"],
-            }),
-          ),
-        );
-      }
+      await enrichStubs(client, ids);
     }
   }
 
-  // ── Re-read from corsair DB (auto-cached by the API calls above) ────
   const fetchLimit = isFilteredLabel ? totalNeeded * 10 : totalNeeded;
-  let rows = await ctx.client.gmail.db.messages.list({
+  let rows = await client.gmail.db.messages.list({
     limit: fetchLimit,
     offset: 0,
   });
@@ -511,22 +496,7 @@ export async function getMailPageData(
 
   const view = opts.view ?? "INBOX";
 
-  const LABEL_MAP: Record<string, string[] | undefined> = {
-    INBOX: undefined,
-    STARRED: ["STARRED"],
-    SENT: ["SENT"],
-    DRAFT: ["DRAFT"],
-    SPAM: ["SPAM"],
-    IMPORTANT: ["IMPORTANT"],
-    UNREAD: ["UNREAD"],
-    CATEGORY_PERSONAL: ["CATEGORY_PERSONAL"],
-    CATEGORY_SOCIAL: ["CATEGORY_SOCIAL"],
-    CATEGORY_UPDATES: ["CATEGORY_UPDATES"],
-    CATEGORY_PROMOTIONS: ["CATEGORY_PROMOTIONS"],
-    CATEGORY_FORUMS: ["CATEGORY_FORUMS"],
-  };
-
-  const labelIds = LABEL_MAP[view] ?? (view.startsWith("CATEGORY_") || view.startsWith("Label_") ? [view] : undefined);
+  const labelIds = MAIL_LABEL_MAP[view] ?? (view.startsWith("CATEGORY_") || view.startsWith("Label_") ? [view] : undefined);
 
   const [list, profile, labels] = await Promise.all([
     getMailList({
@@ -875,4 +845,94 @@ export async function forwardMessage(
     id: (result as { id?: string }).id || "",
     threadId: (result as { threadId?: string }).threadId || threadId,
   };
+}
+
+export async function clearMailCache(): Promise<{
+  deletedMessages: number;
+  deletedLabels: number;
+}> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+
+  const allMessages = await ctx.client.gmail.db.messages.list({ limit: 10000 });
+  let deletedMessages = 0;
+  for (const row of allMessages) {
+    const entityId = row.data.id;
+    if (typeof entityId === "string") {
+      const ok = await ctx.client.gmail.db.messages.deleteByEntityId(entityId);
+      if (ok) deletedMessages++;
+    }
+  }
+
+  const allLabels = await ctx.client.gmail.db.labels.list();
+  let deletedLabels = 0;
+  for (const row of allLabels) {
+    const entityId = row.data.id;
+    if (typeof entityId === "string") {
+      const ok = await ctx.client.gmail.db.labels.deleteByEntityId(entityId);
+      if (ok) deletedLabels++;
+    }
+  }
+
+  return { deletedMessages, deletedLabels };
+}
+
+export async function createDraft(params: {
+  to?: string;
+  cc?: string;
+  bcc?: string;
+  subject?: string;
+  html?: string;
+}): Promise<{ id: string }> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+
+  const raw = buildEncodedMimeMessage({
+    to: params.to ? params.to.split(",").map((e) => e.trim()).filter(Boolean) : [],
+    cc: params.cc ? params.cc.split(",").map((e) => e.trim()).filter(Boolean) : undefined,
+    bcc: params.bcc ? params.bcc.split(",").map((e) => e.trim()).filter(Boolean) : undefined,
+    subject: params.subject || "(No subject)",
+    html: params.html || "",
+  });
+
+  const result = await ctx.client.gmail.api.drafts.create({
+    draft: { message: { raw } },
+  });
+  return { id: (result as { id?: string }).id || "" };
+}
+
+export async function updateDraft(
+  draftId: string,
+  params: {
+    to?: string;
+    cc?: string;
+    bcc?: string;
+    subject?: string;
+    html?: string;
+  },
+): Promise<{ id: string }> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+
+  const raw = buildEncodedMimeMessage({
+    to: params.to ? params.to.split(",").map((e) => e.trim()).filter(Boolean) : [],
+    cc: params.cc ? params.cc.split(",").map((e) => e.trim()).filter(Boolean) : undefined,
+    bcc: params.bcc ? params.bcc.split(",").map((e) => e.trim()).filter(Boolean) : undefined,
+    subject: params.subject || "(No subject)",
+    html: params.html || "",
+  });
+
+  const result = await ctx.client.gmail.api.drafts.update({
+    id: draftId,
+    draft: { message: { raw } },
+  });
+  return { id: draftId, ...(result as object) };
+}
+
+export async function deleteDraft(draftId: string): Promise<{ ok: boolean }> {
+  const ctx = await getClient();
+  if (!ctx) throw new Error("Not authenticated");
+
+  await ctx.client.gmail.api.drafts.delete({ id: draftId });
+  return { ok: true };
 }

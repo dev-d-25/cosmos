@@ -31,7 +31,7 @@ import type {
   MailListResponse,
   MailProfile,
   MailLabel,
-} from "@/server/mail/types";
+} from "@/server/mail/schemas";
 import {
   useMailThreads,
   useMailMessage,
