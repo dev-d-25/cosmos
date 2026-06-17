@@ -67,11 +67,11 @@ export function EmailIframe({ html, className, messageId, inlineImages }: EmailI
           : "";
       if (!proxyUrl) continue;
       result = result.replace(
-        new RegExp(`cid:${escapedCid}`, "g"),
+        new RegExp(`cid:${escapedCid}`, "gi"),
         proxyUrl,
       );
       result = result.replace(
-        new RegExp(`["']?${escapedCid}["']?`, "g"),
+        new RegExp(`["']?${escapedCid}["']?`, "gi"),
         proxyUrl,
       );
     }
