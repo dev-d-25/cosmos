@@ -80,11 +80,12 @@ export function MailInterface({
   // ─── TanStack Query hooks ──────────────────────────────────────────────
   const [pageIndex, setPageIndex] = useState(() => {
     const urlPage = searchParams.get("page");
-    return urlPage ? Math.max(0, Number(urlPage)) : (initialPage ?? 0);
+    // URL is 1-based, pageIndex is 0-based
+    return urlPage ? Math.max(0, Number(urlPage) - 1) : (initialPage ?? 0);
   });
   const [pageTokens, setPageTokens] = useState<(string | undefined)[]>(() => {
     const urlPage = searchParams.get("page");
-    const idx = urlPage ? Math.max(0, Number(urlPage)) : (initialPage ?? 0);
+    const idx = urlPage ? Math.max(0, Number(urlPage) - 1) : (initialPage ?? 0);
     return Array.from({ length: idx + 1 }, (_, i) => undefined);
   });
   const [pageError, setPageError] = useState<string | null>(null);
@@ -150,9 +151,13 @@ export function MailInterface({
   const hasMore = threadsQuery.data?.nextPageToken !== null && threadsQuery.data?.nextPageToken !== undefined;
   const totalCount = threadsQuery.data?.totalCount ?? 0;
   const pageSize = 50;
-  const totalPages = totalCount > 0
-    ? Math.ceil(totalCount / pageSize)
-    : Math.max(1, pageIndex + 1 + (hasMore ? 1 : 0));
+  const calculatedPages = totalCount > 0 ? Math.ceil(totalCount / pageSize) : 1;
+  // When hasMore is true, we don't yet know the true final page count
+  // (e.g., when totalCount came from a partial cache read). Guarantee at
+  // least one page ahead of the current pageIndex so NEXT stays enabled.
+  const totalPages = hasMore
+    ? Math.max(calculatedPages, pageIndex + 2)
+    : Math.max(1, calculatedPages);
 
   const labels: MailLabel[] = labelsQuery.data ?? [];
   const profile: MailProfile | null = profileQuery.data ?? null;
@@ -191,7 +196,8 @@ export function MailInterface({
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (pageIndex > 0) {
-      params.set("page", String(pageIndex));
+      // URL is 1-based for human-friendly navigation
+      params.set("page", String(pageIndex + 1));
     } else {
       params.delete("page");
     }
@@ -200,8 +206,10 @@ export function MailInterface({
     } else {
       params.delete("id");
     }
-    router.replace(`?${params.toString()}`, { scroll: false });
-  }, [pageIndex, selectedId, router]);
+    // Use history.replaceState to avoid triggering SSR re-render
+    // (router.replace re-runs the server component unnecessarily)
+    window.history.replaceState(null, "", `?${params.toString()}`);
+  }, [pageIndex, selectedId]);
 
   // ─── Callbacks ─────────────────────────────────────────────────────────
   const onSelect = useCallback((id: string) => {

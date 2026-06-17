@@ -16,7 +16,7 @@ import type {
   MailPageData,
   MailProfile,
 } from "./schemas";
-import { MAIL_LABEL_MAP } from "@/lib/mail/labels";
+import { MAIL_LABELS } from "@/lib/mail/labels";
 
 const INBOX_LABEL = "INBOX";
 const DEFAULT_PAGE_SIZE = 50;
@@ -208,7 +208,7 @@ async function syncLabelFromGmail(
   limit: number,
   labelIds?: string[],
   q?: string,
-): Promise<{ nextPageToken: string | null }> {
+): Promise<{ nextPageToken: string | null; resultSizeEstimate: number | null }> {
   const t0 = Date.now();
   const listResult = await client.gmail.api.messages.list({
     userId: "me",
@@ -222,11 +222,13 @@ async function syncLabelFromGmail(
     .filter((id): id is string => !!id);
 
   console.log(
-    `[mail] syncLabelFromGmail: got ${ids.length} IDs from Gmail in ${Date.now() - t0}ms`,
+    `[mail] syncLabelFromGmail: got ${ids.length} IDs from Gmail in ${Date.now() - t0}ms (resultSizeEstimate=${listResult.resultSizeEstimate ?? "n/a"})`,
   );
 
+  const resultSizeEstimate = listResult.resultSizeEstimate ?? null;
+
   if (ids.length === 0) {
-    return { nextPageToken: null };
+    return { nextPageToken: null, resultSizeEstimate };
   }
 
   await enrichStubs(client, ids);
@@ -234,6 +236,7 @@ async function syncLabelFromGmail(
   return {
     nextPageToken:
       ids.length >= limit ? (listResult.nextPageToken ?? null) : null,
+    resultSizeEstimate,
   };
 }
 
@@ -310,7 +313,7 @@ async function getMailListFromQuery(
     items,
     nextPageToken: apiResult.nextPageToken ?? null,
     source: "live",
-    totalCount: 0,
+    totalCount: apiResult.resultSizeEstimate ?? 0,
   };
 }
 
@@ -382,7 +385,7 @@ async function getMailListFromNormal(
   // ── Page 0: always sync from Gmail (ensures full enrichment) ────
   if (pageIndex === 0) {
     const t0 = Date.now();
-    const { nextPageToken } = await syncLabelFromGmail(
+    const { nextPageToken, resultSizeEstimate } = await syncLabelFromGmail(
       client,
       totalNeeded,
       labelIds,
@@ -390,13 +393,28 @@ async function getMailListFromNormal(
     );
     let nextToken = nextPageToken;
     if (!nextToken && !isFilteredLabel) {
-      const total = await client.gmail.db.messages.count();
+      // Use Gmail's estimate when available — more accurate than DB total
+      // (DB count includes messages from ALL labels, not just INBOX).
+      const total =
+        resultSizeEstimate != null && resultSizeEstimate > 0
+          ? resultSizeEstimate
+          : await client.gmail.db.messages.count();
       if (total > (pageIndex + 1) * pageSize) {
         nextToken = makeCachePageToken(pageIndex + 1);
       }
     }
     console.log(`[mail] Page 0 sync done in ${Date.now() - t0}ms`);
-    return buildPageFromDB(client, offset, pageSize, totalNeeded, isFilteredLabel, labelIds, nextToken, "live");
+    return buildPageFromDB(
+      client,
+      offset,
+      pageSize,
+      totalNeeded,
+      isFilteredLabel,
+      labelIds,
+      nextToken,
+      "live",
+      resultSizeEstimate,
+    );
   }
 
   // ── Page 1+: try cache first, enrich any stubs before returning ────
@@ -465,6 +483,7 @@ async function getMailListFromNormal(
     ...(opts.q ? { q: opts.q, includeSpamTrash: true } : { labelIds }),
   });
   const nextToken = apiResult.nextPageToken ?? null;
+  const resultSizeEstimate = apiResult.resultSizeEstimate ?? null;
 
   const ids = (apiResult.messages ?? [])
     .map((m) => m.id)
@@ -474,7 +493,17 @@ async function getMailListFromNormal(
     await enrichStubs(client, ids);
   }
 
-  return buildPageFromDB(client, offset, pageSize, totalNeeded, isFilteredLabel, labelIds, nextToken, "live");
+  return buildPageFromDB(
+    client,
+    offset,
+    pageSize,
+    totalNeeded,
+    isFilteredLabel,
+    labelIds,
+    nextToken,
+    "live",
+    resultSizeEstimate,
+  );
 }
 
 async function buildPageFromDB(
@@ -486,6 +515,7 @@ async function buildPageFromDB(
   labelIds: string[],
   nextToken: string | null,
   source: "cache" | "live",
+  resultSizeEstimate?: number | null,
 ): Promise<MailListResponse> {
   const fetchLimit = isFilteredLabel ? totalNeeded * 10 : totalNeeded;
   let rows = await client.gmail.db.messages.list({
@@ -518,7 +548,7 @@ async function buildPageFromDB(
 
   const enriched = rows.filter(isRowEnriched);
 
-  console.log(`[mail] buildPageFromDB: totalRows=${rows.length} enriched=${enriched.length} fetchLimit=${fetchLimit}`);
+  console.log(`[mail] buildPageFromDB: totalRows=${rows.length} enriched=${enriched.length} fetchLimit=${fetchLimit} resultSizeEstimate=${resultSizeEstimate ?? "n/a"}`);
 
   const page = sortByReceivedDesc(rowsToListItems(enriched)).slice(
     offset,
@@ -527,7 +557,31 @@ async function buildPageFromDB(
 
   const hasMore =
     enriched.length > offset + pageSize || nextToken !== null;
-  const totalCount = isFilteredLabel ? enriched.length : await client.gmail.db.messages.count();
+
+  // totalCount priority:
+  //   1. resultSizeEstimate from Gmail API (most accurate, live count)
+  //   2. Label.messagesTotal from DB for single-label views (cached exact count)
+  //   3. Fallback to local enriched rows / DB total
+  let totalCount: number;
+  if (resultSizeEstimate != null && resultSizeEstimate > 0) {
+    totalCount = resultSizeEstimate;
+  } else if (labelIds.length === 1) {
+    const cachedLabels = await client.gmail.db.labels.list();
+    const matchingLabel = cachedLabels.find(
+      (l) => (l.data as Record<string, unknown>).id === labelIds[0],
+    );
+    const labelTotal = matchingLabel
+      ? ((matchingLabel.data as Record<string, unknown>).messagesTotal as
+          | number
+          | undefined)
+      : undefined;
+    totalCount = labelTotal ?? enriched.length;
+  } else {
+    totalCount = isFilteredLabel
+      ? enriched.length
+      : await client.gmail.db.messages.count();
+  }
+
   console.log(`[mail] buildPageFromDB: returning ${page.length} items, totalCount=${totalCount}`);
   return {
     items: page,
@@ -688,7 +742,21 @@ export async function getMailPageData(
 
   const view = opts.view ?? "INBOX";
 
-  const labelIds = MAIL_LABEL_MAP[view] ?? (view.startsWith("CATEGORY_") || view.startsWith("Label_") ? [view] : undefined);
+  const labelDef = MAIL_LABELS.find((l) => l.id === view);
+  let labelIds: string[] | undefined;
+  let viewQuery: string | undefined;
+  if (labelDef?.gmailQuery) {
+    // ARCHIVE and any future query-based views
+    viewQuery = labelDef.gmailQuery;
+    labelIds = undefined;
+  } else if (labelDef?.gmailLabel) {
+    labelIds = [labelDef.gmailLabel];
+  } else {
+    labelIds =
+      view.startsWith("CATEGORY_") || view.startsWith("Label_")
+        ? [view]
+        : undefined;
+  }
 
   const [list, profile, labels] = await Promise.all([
     getMailList({
@@ -696,6 +764,7 @@ export async function getMailPageData(
       pageSize: DEFAULT_PAGE_SIZE,
       force: opts.force,
       labelIds,
+      q: viewQuery,
     }),
     getProfile(),
     getLabels(),
