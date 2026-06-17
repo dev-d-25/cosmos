@@ -51,9 +51,13 @@ import { getGmailParamsForView, MAIL_LABELS } from "@/lib/mail/labels";
 export function MailInterface({
   initial,
   initialLabel,
+  initialPage,
+  initialSelectedId,
 }: {
   initial: MailPageData;
   initialLabel: string;
+  initialPage?: number;
+  initialSelectedId?: string | null;
 }) {
   const gmailConnected = initial.gmailConnected;
   const router = useRouter();
@@ -64,7 +68,7 @@ export function MailInterface({
   const labelName = labelDef?.name ?? activeLabel;
 
   // ─── Local UI state ────────────────────────────────────────────────────
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(() => searchParams.get("id") ?? initialSelectedId ?? null);
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [composeOpen, setComposeOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -74,8 +78,15 @@ export function MailInterface({
     : getGmailParamsForView(activeLabel);
 
   // ─── TanStack Query hooks ──────────────────────────────────────────────
-  const [pageIndex, setPageIndex] = useState(0);
-  const [pageTokens, setPageTokens] = useState<(string | undefined)[]>([undefined]);
+  const [pageIndex, setPageIndex] = useState(() => {
+    const urlPage = searchParams.get("page");
+    return urlPage ? Math.max(0, Number(urlPage)) : (initialPage ?? 0);
+  });
+  const [pageTokens, setPageTokens] = useState<(string | undefined)[]>(() => {
+    const urlPage = searchParams.get("page");
+    const idx = urlPage ? Math.max(0, Number(urlPage)) : (initialPage ?? 0);
+    return Array.from({ length: idx + 1 }, (_, i) => undefined);
+  });
   const [pageError, setPageError] = useState<string | null>(null);
 
   const currentPageToken = pageTokens[pageIndex];
@@ -175,6 +186,22 @@ export function MailInterface({
       });
     }
   }, [threadsQuery.data?.nextPageToken, pageIndex]);
+
+  // ─── Sync pageIndex and selectedId to URL ──────────────────────────────
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (pageIndex > 0) {
+      params.set("page", String(pageIndex));
+    } else {
+      params.delete("page");
+    }
+    if (selectedId) {
+      params.set("id", selectedId);
+    } else {
+      params.delete("id");
+    }
+    router.replace(`?${params.toString()}`, { scroll: false });
+  }, [pageIndex, selectedId, router]);
 
   // ─── Callbacks ─────────────────────────────────────────────────────────
   const onSelect = useCallback((id: string) => {

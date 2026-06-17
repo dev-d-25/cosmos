@@ -129,7 +129,7 @@ export function EmailIframe({ html, className, messageId, inlineImages }: EmailI
     <iframe
       ref={iframeRef}
       srcDoc={srcDoc}
-      sandbox="allow-same-origin"
+      sandbox="allow-same-origin allow-popups"
       referrerPolicy="no-referrer"
       title="Email content"
       onLoad={onLoad}

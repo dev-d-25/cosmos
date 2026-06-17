@@ -531,7 +531,7 @@ async function buildPageFromDB(
   console.log(`[mail] buildPageFromDB: returning ${page.length} items, totalCount=${totalCount}`);
   return {
     items: page,
-    nextPageToken: hasMore ? makeCachePageToken(Math.floor(offset / pageSize) + 1) : null,
+    nextPageToken: hasMore ? (nextToken ?? makeCachePageToken(Math.floor(offset / pageSize) + 1)) : null,
     source,
     totalCount,
   };
