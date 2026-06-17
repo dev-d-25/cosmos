@@ -8,7 +8,7 @@ import { toMailMessage } from "@/server/mail/transformers";
 
 export async function GET(
   _req: Request,
-  { params }: { params: Promise<{ id: string }> },
+  { params }: { params: Promise<{ messageId: string }> },
 ) {
   const tenantId = await getSessionTenantId();
   if (!tenantId) {
@@ -16,14 +16,14 @@ export async function GET(
   }
 
   try {
-    const { id } = await params;
+    const { messageId } = await params;
     const rawRefresh = new URL(_req.url).searchParams.get("refresh") ?? undefined;
 
     const query = MailMessageQuerySchema.parse({
       refresh: rawRefresh,
     });
 
-    const result = await getMessage(id, { force: query.refresh === "true" });
+    const result = await getMessage(messageId, { force: query.refresh === "true" });
     if (!result) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
     const transformed = toMailMessage(result.message);
