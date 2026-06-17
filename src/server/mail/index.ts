@@ -632,7 +632,12 @@ export async function getMessage(
 export async function refreshInbox(): Promise<{ synced: number }> {
   const ctx = await getClient();
   if (!ctx) return { synced: 0 };
-  await syncLabelFromGmail(ctx.client, DEFAULT_PAGE_SIZE, [INBOX_LABEL]);
+  const inboxDef = MAIL_LABELS.find((l) => l.id === "INBOX");
+  if (inboxDef?.gmailQuery) {
+    await syncLabelFromGmail(ctx.client, DEFAULT_PAGE_SIZE, undefined, inboxDef.gmailQuery);
+  } else {
+    await syncLabelFromGmail(ctx.client, DEFAULT_PAGE_SIZE, [INBOX_LABEL]);
+  }
   const rows = await ctx.client.gmail.db.messages.list({
     limit: DEFAULT_PAGE_SIZE,
     offset: 0,

@@ -191,7 +191,10 @@ export function MailList({
                           "UNREAD",
                           "IMPORTANT",
                           "CATEGORY_PERSONAL",
+                          "CATEGORY_SOCIAL",
                           "CATEGORY_UPDATES",
+                          "CATEGORY_PROMOTIONS",
+                          "CATEGORY_FORUMS",
                         ].includes(l),
                     )
                     .slice(0, 3)
