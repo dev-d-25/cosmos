@@ -127,7 +127,9 @@ export function useMailThreads(opts: {
     queryFn: () => fetchMailThreads(opts),
     initialData: opts.initialData,
     placeholderData: (prev) => prev,
-    staleTime: 5 * 60 * 1000,
+    // Shorter staleTime so background-sync results show up promptly.
+    staleTime: 30 * 1000,
+    refetchOnWindowFocus: true,
   });
 }
 

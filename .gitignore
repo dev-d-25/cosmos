@@ -1,6 +1,5 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
-D:\corsair\cosmos\scripts
 # dependencies
 /node_modules
 /.pnp
@@ -8,6 +7,7 @@ D:\corsair\cosmos\scripts
 
 # testing
 /coverage
+/.commandcode
 
 # database
 /prisma/db.sqlite
@@ -33,7 +33,6 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # local env files
-# do not commit any .env files to git, except for the .env.example file. https://create.t3.gg/en/usage/env-variables#using-environment-variables
 .env
 .env*.local
 
@@ -52,8 +51,9 @@ yarn-error.log*
 AGENTS.md
 skills-lock.json
 
-# plans (local working notes)
+# plans and scripts (local working notes)
 plans/
+scripts/
 
 # Local scratch/debug/plan files — not part of the product
 check-payload-headers.mjs
@@ -63,10 +63,4 @@ fix-plan-visual.html
 contact-suggestions-architecture.html
 corsair-sdk-bug-report.html
 draft-contact-suggestions-plan.md
-scripts/run-test-chat.ps1
 .gitignore
-scripts/test-mcp-list.ts
-.gitignore
-.gitignore
-scripts/test-step1-kilo.ts
-scripts/test-chat.ts
