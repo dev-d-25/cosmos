@@ -53,3 +53,12 @@ skills-lock.json
 
 # plans (local working notes)
 plans/
+
+# Local scratch/debug/plan files — not part of the product
+check-payload-headers.mjs
+clear-db.mjs
+mail-bug-diagnosis.html
+fix-plan-visual.html
+contact-suggestions-architecture.html
+corsair-sdk-bug-report.html
+draft-contact-suggestions-plan.md

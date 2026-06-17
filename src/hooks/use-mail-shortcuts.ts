@@ -58,6 +58,7 @@ interface UseMailShortcutsOpts {
   onOpen: (id: string) => void;
   onClose: () => void;
   onMailAction: (action: string, id: string) => void;
+  navigate: (url: string) => void;
   composeOpen: boolean;
   shortcutsOpen: boolean;
   setShortcutsOpen: (open: boolean) => void;
@@ -70,6 +71,7 @@ export function useMailShortcuts({
   onOpen,
   onClose,
   onMailAction,
+  navigate,
   composeOpen,
   shortcutsOpen,
   setShortcutsOpen,
@@ -90,6 +92,10 @@ export function useMailShortcuts({
   shortcutsOpenRef.current = shortcutsOpen;
   const setShortcutsOpenRef = useRef(setShortcutsOpen);
   setShortcutsOpenRef.current = setShortcutsOpen;
+  const navigateRef = useRef(navigate);
+  navigateRef.current = navigate;
+  const gPressedRef = useRef(false);
+  const gTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -104,6 +110,50 @@ export function useMailShortcuts({
         return;
       }
       if (composeOpenRef.current) return;
+
+      // g+key state machine
+      if (gPressedRef.current) {
+        gPressedRef.current = false;
+        if (gTimeoutRef.current) {
+          clearTimeout(gTimeoutRef.current);
+          gTimeoutRef.current = null;
+        }
+
+        if (event.key === "i") {
+          event.preventDefault();
+          navigateRef.current("/mail?label=INBOX");
+          return;
+        } else if (event.key === "d") {
+          event.preventDefault();
+          navigateRef.current("/mail?label=DRAFT");
+          return;
+        } else if (event.key === "t") {
+          event.preventDefault();
+          navigateRef.current("/mail?label=SENT");
+          return;
+        } else if (event.key === "a") {
+          event.preventDefault();
+          navigateRef.current("/mail?label=ARCHIVE");
+          return;
+        } else if (event.key === "s") {
+          event.preventDefault();
+          navigateRef.current("/mail?label=STARRED");
+          return;
+        }
+        // If not a valid g+key combo, fall through to normal handling
+      }
+
+      if (event.key === "g") {
+        event.preventDefault();
+        gPressedRef.current = true;
+        if (gTimeoutRef.current) clearTimeout(gTimeoutRef.current);
+        gTimeoutRef.current = setTimeout(() => {
+          gPressedRef.current = false;
+          gTimeoutRef.current = null;
+        }, 1000);
+        return;
+      }
+
       const currentItems = itemsRef.current;
       if (!currentItems.length) return;
 
@@ -158,6 +208,9 @@ export function useMailShortcuts({
       }
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (gTimeoutRef.current) clearTimeout(gTimeoutRef.current);
+    };
   }, [setSelectedId]);
 }
