@@ -1,3 +1,5 @@
+export const DEFAULT_MODEL = "stepfun/step-3.7-flash:free";
+
 export type ModelOption = {
   id: string;
   label: string;

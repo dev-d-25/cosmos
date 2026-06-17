@@ -20,19 +20,32 @@ export type CorsairToolsHandle = {
 export async function getCorsairToolsForTenant(
   tenantId: string,
 ): Promise<CorsairToolsHandle> {
-  const server = createBaseMcpServer({ corsair, tenantId });
+  console.log("[corsair-tools] Creating MCP server for tenant:", tenantId);
+  const tenantClient = corsair.withTenant(tenantId);
+  const server = createBaseMcpServer({ corsair: tenantClient, tenantId });
+  console.log("[corsair-tools] MCP server created (tenant-scoped)");
+
   const [serverTransport, clientTransport] =
     InMemoryTransport.createLinkedPair();
 
+  console.log("[corsair-tools] Connecting MCP server...");
   await server.connect(serverTransport);
+  console.log("[corsair-tools] MCP server connected");
 
+  console.log("[corsair-tools] Creating MCP client...");
   const client = await createMCPClient({
     name: "cosmos-chat-client",
     version: "0.1.0",
     transport: clientTransport,
   });
+  console.log("[corsair-tools] MCP client created");
 
+  console.log("[corsair-tools] Fetching tools from MCP server...");
   const tools = await client.tools();
+  console.log(
+    "[corsair-tools] Tools fetched:",
+    Object.keys(tools),
+  );
 
   return { client, tools };
 }
