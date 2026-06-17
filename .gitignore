@@ -1,5 +1,6 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
+D:\corsair\cosmos\scripts
 # dependencies
 /node_modules
 /.pnp
@@ -62,3 +63,10 @@ fix-plan-visual.html
 contact-suggestions-architecture.html
 corsair-sdk-bug-report.html
 draft-contact-suggestions-plan.md
+scripts/run-test-chat.ps1
+.gitignore
+scripts/test-mcp-list.ts
+.gitignore
+.gitignore
+scripts/test-step1-kilo.ts
+scripts/test-chat.ts

@@ -1,6 +1,8 @@
 import { relations } from "drizzle-orm";
 import {
   boolean,
+  index,
+  integer,
   jsonb,
   pgTable,
   text,
@@ -141,3 +143,103 @@ export const corsairEvents = pgTable("corsair_events", {
   payload: jsonb("payload").notNull().default({}),
   status: text("status"),
 });
+
+export const chatThread = pgTable(
+  "chat_thread",
+  {
+    id: text("id").primaryKey(),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    title: text("title").notNull(),
+    model: text("model").notNull(),
+    systemContext: jsonb("system_context").notNull().default({}),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    archivedAt: timestamp("archived_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("chat_thread_user_updated_idx").on(t.userId, t.updatedAt.desc()),
+  ],
+);
+
+export const chatMessage = pgTable(
+  "chat_message",
+  {
+    id: text("id").primaryKey(),
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => chatThread.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    role: text("role", { enum: ["user", "assistant", "system"] }).notNull(),
+    parts: jsonb("parts").notNull(),
+    model: text("model"),
+    inputTokens: integer("input_tokens"),
+    outputTokens: integer("output_tokens"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [index("chat_message_thread_created_idx").on(t.threadId, t.createdAt)],
+);
+
+export const chatToolCall = pgTable(
+  "chat_tool_call",
+  {
+    id: text("id").primaryKey(),
+    messageId: text("message_id")
+      .notNull()
+      .references(() => chatMessage.id, { onDelete: "cascade" }),
+    threadId: text("thread_id")
+      .notNull()
+      .references(() => chatThread.id, { onDelete: "cascade" }),
+    userId: text("user_id")
+      .notNull()
+      .references(() => user.id, { onDelete: "cascade" }),
+    toolName: text("tool_name").notNull(),
+    input: jsonb("input").notNull(),
+    output: jsonb("output"),
+    status: text("status", { enum: ["ok", "error"] }).notNull(),
+    durationMs: integer("duration_ms").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("chat_tool_call_thread_created_idx").on(t.threadId, t.createdAt),
+    index("chat_tool_call_user_created_idx").on(t.userId, t.createdAt),
+  ],
+);
+
+export const chatThreadRelations = relations(chatThread, ({ one, many }) => ({
+  user: one(user, { fields: [chatThread.userId], references: [user.id] }),
+  messages: many(chatMessage),
+  toolCalls: many(chatToolCall),
+}));
+
+export const chatMessageRelations = relations(chatMessage, ({ one, many }) => ({
+  thread: one(chatThread, {
+    fields: [chatMessage.threadId],
+    references: [chatThread.id],
+  }),
+  user: one(user, { fields: [chatMessage.userId], references: [user.id] }),
+  toolCalls: many(chatToolCall),
+}));
+
+export const chatToolCallRelations = relations(chatToolCall, ({ one }) => ({
+  message: one(chatMessage, {
+    fields: [chatToolCall.messageId],
+    references: [chatMessage.id],
+  }),
+  thread: one(chatThread, {
+    fields: [chatToolCall.threadId],
+    references: [chatThread.id],
+  }),
+  user: one(user, { fields: [chatToolCall.userId], references: [user.id] }),
+}));

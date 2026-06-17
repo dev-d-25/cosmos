@@ -15,6 +15,8 @@ export const env = createEnv({
     APP_URL: z.string().url(),
     DATABASE_URL: z.string().url(),
     CORSAIR_KEK: z.string(),
+    KILO_API_KEY: z.string().optional(),
+    KILO_DEFAULT_MODEL: z.string().default("kilo-auto/free"),
     NODE_ENV: z
       .enum(["development", "test", "production"])
       .default("development"),
@@ -38,6 +40,8 @@ export const env = createEnv({
     BETTER_AUTH_SECRET: process.env.BETTER_AUTH_SECRET,
     DATABASE_URL: process.env.DATABASE_URL,
     CORSAIR_KEK: process.env.CORSAIR_KEK,
+    KILO_API_KEY: process.env.KILO_API_KEY,
+    KILO_DEFAULT_MODEL: process.env.KILO_DEFAULT_MODEL,
     NODE_ENV: process.env.NODE_ENV,
     GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET: process.env.GOOGLE_CLIENT_SECRET,

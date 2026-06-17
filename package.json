@@ -18,13 +18,18 @@
     "preview": "next build && next start",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:chat": "tsx scripts/test-chat.ts"
   },
   "dependencies": {
+    "@ai-sdk/mcp": "1.0.52",
+    "@ai-sdk/openai": "3.0.72",
     "@auth/drizzle-adapter": "^1.7.2",
     "@base-ui/react": "1.5.0",
     "@corsair-dev/gmail": "0.1.4",
     "@corsair-dev/googlecalendar": "0.1.4",
+    "@corsair-dev/mcp": "0.1.22",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@phosphor-icons/react": "2.1.10",
     "@t3-oss/env-nextjs": "^0.13.11",
     "@tanstack/react-query": "5.101.0",
@@ -34,6 +39,7 @@
     "@tiptap/react": "3.26.1",
     "@tiptap/starter-kit": "3.26.1",
     "@types/he": "1.2.3",
+    "ai": "6.0.207",
     "better-auth": "^1.6.14",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
