@@ -1,4 +1,4 @@
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
   boolean,
   index,
@@ -8,7 +8,6 @@ import {
   text,
   timestamp,
 } from "drizzle-orm/pg-core";
-
 export const user = pgTable("user", {
   id: text("id").primaryKey(),
   name: text("name").notNull(),
@@ -111,22 +110,36 @@ export const corsairAccounts = pgTable("corsair_accounts", {
   dek: text("dek"),
 });
 
-export const corsairEntities = pgTable("corsair_entities", {
-  id: text("id").primaryKey(),
-  createdAt: timestamp("created_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true })
-    .notNull()
-    .defaultNow(),
-  accountId: text("account_id")
-    .notNull()
-    .references(() => corsairAccounts.id),
-  entityId: text("entity_id").notNull(),
-  entityType: text("entity_type").notNull(),
-  version: text("version").notNull(),
-  data: jsonb("data").notNull().default({}),
-});
+export const corsairEntities = pgTable(
+  "corsair_entities",
+  {
+    id: text("id").primaryKey(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    accountId: text("account_id")
+      .notNull()
+      .references(() => corsairAccounts.id),
+    entityId: text("entity_id").notNull(),
+    entityType: text("entity_type").notNull(),
+    version: text("version").notNull(),
+    data: jsonb("data").notNull().default({}),
+  },
+  (t) => [
+    index("idx_corsair_entities_tenant_type_entity").on(
+      t.accountId,
+      t.entityType,
+      t.entityId,
+    ),
+    index("idx_corsair_entities_type_created").on(t.entityType, t.createdAt.desc()),
+    index("idx_corsair_entities_messages_labels")
+      .using("gin", sql`(${t.data}->'labelIds')`)
+      .where(sql`${t.entityType} = 'messages'`),
+  ],
+);
 
 export const corsairEvents = pgTable("corsair_events", {
   id: text("id").primaryKey(),
