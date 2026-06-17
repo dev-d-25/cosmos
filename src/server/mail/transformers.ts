@@ -1,4 +1,4 @@
-import type { MailAttachment, MailListItem, MailMessage } from "./schemas";
+import type { MailAttachment, MailInlineImage, MailListItem, MailMessage } from "./schemas";
 
 export function getHeader(
   headers: { name?: string; value?: string }[] | undefined,
@@ -85,6 +85,59 @@ export function getPartAttachments(
   return attachments;
 }
 
+function normalizeContentId(raw: string): string {
+  return raw
+    .trim()
+    .replace(/^</, "")
+    .replace(/>$/, "")
+    .replace(/^cid:/i, "")
+    .replace(/^["']|["']$/g, "")
+    .toLowerCase();
+}
+
+export function getInlineImages(
+  payload: { parts?: any[]; mimeType?: string; body?: { data?: string } } | undefined,
+): MailInlineImage[] {
+  if (!Array.isArray(payload?.parts)) return [];
+  const images: MailInlineImage[] = [];
+  const seen = new Set<string>();
+
+  function walk(part: any): void {
+    if (!part) return;
+    const contentIdHeader = part.headers?.find(
+      (h: { name?: string }) => h.name?.toLowerCase() === "content-id",
+    );
+    const contentId = contentIdHeader?.value
+      ? normalizeContentId(contentIdHeader.value as string)
+      : "";
+    const isImage = typeof part.mimeType === "string" && part.mimeType.startsWith("image/");
+    if (contentId && isImage && !seen.has(contentId)) {
+      if (part.body?.attachmentId) {
+        images.push({
+          contentId,
+          attachmentId: part.body.attachmentId,
+          mimeType: part.mimeType,
+        });
+        seen.add(contentId);
+      } else if (part.body?.data) {
+        const dataUri = `data:${part.mimeType};base64,${part.body.data.replace(/-/g, "+").replace(/_/g, "/")}`;
+        images.push({
+          contentId,
+          mimeType: part.mimeType,
+          dataUri,
+        });
+        seen.add(contentId);
+      }
+    }
+    if (Array.isArray(part.parts)) {
+      for (const sub of part.parts) walk(sub);
+    }
+  }
+
+  for (const part of payload.parts) walk(part);
+  return images;
+}
+
 export function toListItem(row: { data: Record<string, unknown> }): MailListItem {
   const d = row.data;
   const internalDateRaw = d.internalDate as number | string | undefined;
@@ -141,6 +194,7 @@ export function toMailMessage(data: Record<string, unknown>): MailMessage {
   const snippet = (data.snippet as string | undefined) ?? "";
   const { bodyHtml, bodyText } = extractBody(payload);
   const attachments = getPartAttachments(payload);
+  const inlineImages = getInlineImages(payload);
 
   const id = (data.id as string | undefined) ?? "";
   const threadId = (data.threadId as string | undefined) ?? "";
@@ -159,5 +213,6 @@ export function toMailMessage(data: Record<string, unknown>): MailMessage {
     bodyHtml: finalBodyHtml,
     bodyText: finalBodyText,
     attachments,
+    inlineImages,
   };
 }

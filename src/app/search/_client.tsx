@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ShortcutsHelp } from "@/components/shortcuts-help";
 import { useRouter, useSearchParams } from "next/navigation";
 
 import { SignOutButton } from "@/components/auth-buttons";
@@ -63,6 +64,12 @@ function formatReceived(iso: string): string {
   const diffDays = Math.floor(diffHrs / 24);
   if (diffDays < 7) return `${diffDays}d`;
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 // ─── Quick Filters ───────────────────────────────────────────────────────────
@@ -493,7 +500,11 @@ function MailViewer({
             </div>
             {message.bodyHtml ? (
               <div className="mt-6">
-                <EmailIframe html={message.bodyHtml} />
+                <EmailIframe
+                  html={message.bodyHtml}
+                  messageId={message.id}
+                  inlineImages={message.inlineImages}
+                />
               </div>
             ) : message.bodyText ? (
               <pre
@@ -518,6 +529,17 @@ function MailViewer({
                       </svg>
                       <span className="truncate">{att.filename}</span>
                       <span className="text-muted-foreground text-[0.625rem]">{att.mimeType}</span>
+                      <span className="text-muted-foreground text-[0.625rem]">
+                        ({formatSize(att.size)})
+                      </span>
+                      <a
+                        href={`/api/mail/messages/${message.id}/attachments/${att.attachmentId}?filename=${encodeURIComponent(att.filename)}&mimeType=${encodeURIComponent(att.mimeType)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-primary hover:underline ml-auto shrink-0"
+                      >
+                        Download
+                      </a>
                     </li>
                   ))}
                 </ul>
@@ -573,6 +595,10 @@ export function SearchInterface({
   const [query, setQuery] = useState(initialQuery);
   const [inputValue, setInputValue] = useState(initialQuery);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [gPressed, setGPressed] = useState(false);
+  const gPressedRef = useRef(false);
+  const gTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const threadsQuery = useMailThreads({
     page: 0,
@@ -696,6 +722,130 @@ export function SearchInterface({
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
+  // Stable refs for keyboard handler
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const selectedIdRef = useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  const onMailActionRef = useRef(onMailAction);
+  onMailActionRef.current = onMailAction;
+  const gPressedStateRef = useRef(gPressed);
+  gPressedStateRef.current = gPressed;
+
+  // Keyboard shortcuts: j/k/arrows, Enter, actions, g+key navigation
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.isContentEditable)
+      ) {
+        return;
+      }
+
+      const currentItems = itemsRef.current;
+      const currentSelectedId = selectedIdRef.current;
+
+      // g+key state machine
+      if (gPressedStateRef.current) {
+        gPressedStateRef.current = false;
+        setGPressed(false);
+        if (gTimeoutRef.current) {
+          clearTimeout(gTimeoutRef.current);
+          gTimeoutRef.current = null;
+        }
+
+        if (event.key === "i") {
+          event.preventDefault();
+          router.push("/mail?label=INBOX");
+          return;
+        } else if (event.key === "d") {
+          event.preventDefault();
+          router.push("/mail?label=DRAFT");
+          return;
+        } else if (event.key === "t") {
+          event.preventDefault();
+          router.push("/mail?label=SENT");
+          return;
+        } else if (event.key === "a") {
+          event.preventDefault();
+          router.push("/mail?label=ARCHIVE");
+          return;
+        } else if (event.key === "s") {
+          event.preventDefault();
+          router.push("/mail?label=STARRED");
+          return;
+        }
+        // If not a valid g+key combo, fall through to normal handling
+      }
+
+      if (event.key === "g") {
+        event.preventDefault();
+        gPressedStateRef.current = true;
+        setGPressed(true);
+        if (gTimeoutRef.current) clearTimeout(gTimeoutRef.current);
+        gTimeoutRef.current = setTimeout(() => {
+          gPressedStateRef.current = false;
+          setGPressed(false);
+          gTimeoutRef.current = null;
+        }, 1000);
+        return;
+      }
+
+      if (!currentItems.length) return;
+
+      if (event.key === "j" || event.key === "ArrowDown") {
+        event.preventDefault();
+        setSelectedId((current) => {
+          const idx = current ? currentItems.findIndex((i) => i.id === current) : -1;
+          const next = currentItems[Math.min(currentItems.length - 1, idx + 1)];
+          return next?.id ?? current;
+        });
+      } else if (event.key === "k" || event.key === "ArrowUp") {
+        event.preventDefault();
+        setSelectedId((current) => {
+          if (!current) return currentItems[currentItems.length - 1]?.id ?? null;
+          const idx = currentItems.findIndex((i) => i.id === current);
+          const next = currentItems[Math.max(0, idx - 1)];
+          return next?.id ?? current;
+        });
+      } else if (event.key === "Enter" || event.key === "o") {
+        if (currentSelectedId) {
+          event.preventDefault();
+          onOpen(currentSelectedId);
+        }
+      } else if (event.key === "Escape") {
+        if (currentSelectedId) {
+          event.preventDefault();
+          onClose();
+        }
+      } else if (event.key === "e" && currentSelectedId) {
+        event.preventDefault();
+        onMailActionRef.current("archive", currentSelectedId);
+      } else if (event.key === "#" && currentSelectedId) {
+        event.preventDefault();
+        onMailActionRef.current("trash", currentSelectedId);
+      } else if (event.key === "s" && currentSelectedId) {
+        event.preventDefault();
+        onMailActionRef.current("star", currentSelectedId);
+      } else if (event.key === "u" && currentSelectedId) {
+        event.preventDefault();
+        onMailActionRef.current("markUnread", currentSelectedId);
+      } else if (event.key === "?") {
+        event.preventDefault();
+        setShortcutsOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      if (gTimeoutRef.current) clearTimeout(gTimeoutRef.current);
+    };
+  }, [router, onOpen, onClose]);
+
   return (
     <div className="bg-background flex h-screen flex-col overflow-hidden">
       <SearchTopNav profile={profile} />
@@ -778,6 +928,18 @@ export function SearchInterface({
           />
         </ResizablePanel>
       </ResizablePanelGroup>
+
+      {/* g+key visual indicator */}
+      {gPressed && (
+        <div className="fixed bottom-4 left-4 z-50">
+          <span className="bg-foreground text-background inline-flex items-center gap-1 rounded px-2 py-1 text-xs font-medium shadow-lg">
+            g
+          </span>
+        </div>
+      )}
+
+      {/* Keyboard shortcuts help */}
+      <ShortcutsHelp open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
     </div>
   );
 }

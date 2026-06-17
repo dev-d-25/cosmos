@@ -11,6 +11,12 @@ import { cn, decodeHtmlEntities, linkifyText } from "@/lib/utils";
 import { formatReceived } from "@/lib/mail/format";
 import type { MailListItem, MailMessage } from "@/server/mail/schemas";
 
+function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 export function MailViewer({
   gmailConnected,
   selectedListItem,
@@ -238,7 +244,11 @@ export function MailViewer({
             </div>
             {message.bodyHtml ? (
               <div className="mt-6">
-                <EmailIframe html={message.bodyHtml} />
+                <EmailIframe
+                  html={message.bodyHtml}
+                  messageId={message.id}
+                  inlineImages={message.inlineImages}
+                />
               </div>
             ) : message.bodyText ? (
               <pre
@@ -268,6 +278,17 @@ export function MailViewer({
                       <span className="text-muted-foreground text-[0.625rem]">
                         {att.mimeType}
                       </span>
+                      <span className="text-muted-foreground text-[0.625rem]">
+                        ({formatSize(att.size)})
+                      </span>
+                      <a
+                        href={`/api/mail/messages/${message.id}/attachments/${att.attachmentId}?filename=${encodeURIComponent(att.filename)}&mimeType=${encodeURIComponent(att.mimeType)}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-primary hover:underline ml-auto shrink-0"
+                      >
+                        Download
+                      </a>
                     </li>
                   ))}
                 </ul>

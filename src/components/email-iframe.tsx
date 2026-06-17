@@ -5,6 +5,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 interface EmailIframeProps {
   html: string;
   className?: string;
+  messageId?: string;
+  inlineImages?: Array<{
+    contentId: string;
+    attachmentId?: string;
+    mimeType: string;
+    dataUri?: string;
+  }>;
 }
 
 function buildSrcDoc(html: string): string {
@@ -36,7 +43,7 @@ function buildSrcDoc(html: string): string {
 </html>`;
 }
 
-export function EmailIframe({ html, className }: EmailIframeProps) {
+export function EmailIframe({ html, className, messageId, inlineImages }: EmailIframeProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const [height, setHeight] = useState(0);
   const [ready, setReady] = useState(false);
@@ -46,9 +53,34 @@ export function EmailIframe({ html, className }: EmailIframeProps) {
     setMounted(true);
   }, []);
 
+  const resolvedHtml = useMemo(() => {
+    if (!inlineImages?.length) return html;
+    let result = html;
+    const origin =
+      typeof window !== "undefined" ? window.location.origin : "";
+    for (const img of inlineImages) {
+      const escapedCid = img.contentId.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const proxyUrl = img.dataUri
+        ? img.dataUri
+        : img.attachmentId
+          ? `${origin}/api/mail/messages/${messageId}/inline/${img.attachmentId}?mimeType=${encodeURIComponent(img.mimeType)}`
+          : "";
+      if (!proxyUrl) continue;
+      result = result.replace(
+        new RegExp(`cid:${escapedCid}`, "g"),
+        proxyUrl,
+      );
+      result = result.replace(
+        new RegExp(`["']?${escapedCid}["']?`, "g"),
+        proxyUrl,
+      );
+    }
+    return result;
+  }, [html, messageId, inlineImages]);
+
   const srcDoc = useMemo(
-    () => (mounted ? buildSrcDoc(html) : ""),
-    [html, mounted],
+    () => (mounted ? buildSrcDoc(resolvedHtml) : ""),
+    [resolvedHtml, mounted],
   );
 
   const measure = useCallback((iframe: HTMLIFrameElement) => {
