@@ -11,8 +11,17 @@ const mockList =
   vi.fn<(opts?: { limit?: number; offset?: number }) => Promise<Row[]>>();
 const mockCount = vi.fn<() => Promise<number>>();
 const mockFindByEntityId = vi.fn<(id: string) => Promise<Row | null>>();
+const mockFindManyByEntityIds = vi.fn<(ids: string[]) => Promise<Row[]>>();
 const mockApiMessagesList = vi.fn();
-const mockApiMessagesGet = vi.fn();
+const mockGetAccessToken = vi.fn<() => Promise<string | null>>();
+
+const mockUpsertManyByEntityIds = vi.fn();
+const mockListByLabel = vi.fn();
+const mockCountByLabel = vi.fn();
+const mockGetAccountIdForTenant = vi.fn();
+
+const mockFetch = vi.fn();
+const mockLabelsList = vi.fn<() => Promise<unknown[]>>();
 
 const mockWithTenant = vi.fn(() => ({
   gmail: {
@@ -21,13 +30,19 @@ const mockWithTenant = vi.fn(() => ({
         list: mockList,
         count: mockCount,
         findByEntityId: mockFindByEntityId,
+        findManyByEntityIds: mockFindManyByEntityIds,
+      },
+      labels: {
+        list: mockLabelsList,
       },
     },
     api: {
       messages: {
         list: mockApiMessagesList,
-        get: mockApiMessagesGet,
       },
+    },
+    keys: {
+      get_access_token: mockGetAccessToken,
     },
   },
 }));
@@ -41,6 +56,13 @@ vi.mock("@/server/corsair", () => ({
 
 vi.mock("@/server/auth", () => ({
   getSessionTenantId: mockGetSessionTenantId,
+}));
+
+vi.mock("@/server/db/mail-entities", () => ({
+  upsertManyByEntityIds: mockUpsertManyByEntityIds,
+  listByLabel: mockListByLabel,
+  countByLabel: mockCountByLabel,
+  getAccountIdForTenant: mockGetAccountIdForTenant,
 }));
 
 function makeRow(id: string, msAgo: number): Row {
@@ -67,19 +89,69 @@ function makeRows(count: number): Row[] {
   );
 }
 
+/**
+ * Mock the global fetch used by enrichStubs to fetch message metadata.
+ * Returns a successful response with a minimal payload (Subject + From).
+ */
+function mockGmailFetchFor(rows: Row[]): void {
+  mockFetch.mockImplementation(async (url: string) => {
+    const match = /\/messages\/([^/?]+)/.exec(url);
+    const id = match?.[1] ?? "";
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id,
+        threadId: `t_${id}`,
+        payload: {
+          headers: [
+            { name: "Subject", value: `Subject ${id}` },
+            { name: "From", value: `${id}@example.com` },
+            { name: "To", value: "me@example.com" },
+          ],
+        },
+      }),
+    };
+  });
+}
+
 describe("getMailList pagination", () => {
   beforeEach(() => {
+    vi.resetModules();
     mockList.mockReset();
     mockCount.mockReset();
     mockFindByEntityId.mockReset();
+    mockFindManyByEntityIds.mockReset();
     mockApiMessagesList.mockReset();
-    mockApiMessagesGet.mockReset();
+    mockGetAccessToken.mockReset();
+    mockUpsertManyByEntityIds.mockReset();
+    mockListByLabel.mockReset();
+    mockCountByLabel.mockReset();
+    mockGetAccountIdForTenant.mockReset();
+    mockFetch.mockReset();
+    mockLabelsList.mockReset();
     mockWithTenant.mockClear();
     mockGetSessionTenantId.mockReset();
     mockGetSessionTenantId.mockResolvedValue("tenant_1");
+    mockGetAccountIdForTenant.mockResolvedValue("account_1");
+    mockGetAccessToken.mockResolvedValue("fake_access_token");
+    mockFindManyByEntityIds.mockResolvedValue([]);
+    mockUpsertManyByEntityIds.mockImplementation(
+      async (_accountId: string, items: Array<{ entityId: string }>) =>
+        items.map((i) => ({ data: { id: i.entityId } })),
+    );
+
+    // Default fetch impl: success
+    vi.stubGlobal("fetch", mockFetch);
+
+    // Default new helpers return empty
+    mockListByLabel.mockResolvedValue([]);
+    mockCountByLabel.mockResolvedValue(0);
+    mockLabelsList.mockResolvedValue([]);
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
 
@@ -94,6 +166,9 @@ describe("getMailList pagination", () => {
 
   it("serves page 0 entirely from cache when cache covers the request", async () => {
     const rows = makeRows(50);
+    // Cache check: read first 50 rows
+    mockList.mockResolvedValueOnce(rows);
+    // buildPageFromDB unfiltered path: read fetchLimit (50)
     mockList.mockResolvedValueOnce(rows);
     mockCount.mockResolvedValueOnce(50);
 
@@ -105,15 +180,20 @@ describe("getMailList pagination", () => {
     expect(result.items).toHaveLength(50);
     expect(result.items[0]?.id).toBe("m_000");
     expect(mockApiMessagesList).not.toHaveBeenCalled();
+    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("returns a slice for page 1 from cache when more rows are cached than needed", async () => {
     const rows = makeRows(120);
+    // getMailListFromCachePage unfiltered: read limit (100)
     mockList.mockResolvedValueOnce(rows);
     mockCount.mockResolvedValueOnce(120);
 
     const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageIndex: 1, pageSize: 50 });
+    const result = await getMailList({
+      pageToken: "cache:1",
+      pageSize: 50,
+    });
 
     expect(result.source).toBe("cache");
     expect(result.items).toHaveLength(50);
@@ -128,7 +208,10 @@ describe("getMailList pagination", () => {
     mockCount.mockResolvedValueOnce(120);
 
     const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageIndex: 2, pageSize: 50 });
+    const result = await getMailList({
+      pageToken: "cache:2",
+      pageSize: 50,
+    });
 
     expect(result.source).toBe("cache");
     expect(result.items).toHaveLength(20);
@@ -138,6 +221,7 @@ describe("getMailList pagination", () => {
 
   it("returns items sorted by receivedAt descending", async () => {
     const rows = makeRows(50);
+    mockList.mockResolvedValueOnce(rows);
     mockList.mockResolvedValueOnce(rows);
     mockCount.mockResolvedValueOnce(50);
 
@@ -153,11 +237,15 @@ describe("getMailList pagination", () => {
     );
   });
 
-  it("warms cache for page 0 when cache is empty", async () => {
-    mockList.mockResolvedValueOnce([]).mockResolvedValueOnce(makeRows(50));
+  it("syncs from Gmail when cache is empty (slow path)", async () => {
+    // Cache check: empty
+    mockList.mockResolvedValueOnce([]);
+    // buildPageFromDB after sync: 50 enriched rows
+    mockList.mockResolvedValueOnce(makeRows(50));
     mockCount.mockResolvedValueOnce(50);
 
-    const apiRows = makeRows(50).map((r, i) => ({
+    // Gmail API returns 50 message IDs
+    const apiRows = makeRows(50).map((r) => ({
       id: r.data.id,
       threadId: r.data.threadId,
     }));
@@ -165,7 +253,8 @@ describe("getMailList pagination", () => {
       messages: apiRows,
       nextPageToken: null,
     });
-    mockApiMessagesGet.mockResolvedValue({});
+    // Direct fetch (Gmail REST API) for enrichment
+    mockGmailFetchFor(makeRows(50));
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({ pageIndex: 0, pageSize: 50 });
@@ -176,10 +265,7 @@ describe("getMailList pagination", () => {
       maxResults: 50,
       labelIds: ["INBOX"],
     });
-    expect(mockApiMessagesGet).toHaveBeenCalledTimes(50);
-    expect(mockApiMessagesGet).toHaveBeenCalledWith(
-      expect.objectContaining({ format: "metadata" }),
-    );
+    expect(mockFetch).toHaveBeenCalledTimes(50);
     expect(result.source).toBe("live");
     expect(result.nextPageToken).toBeNull();
     expect(result.items).toHaveLength(50);
@@ -187,8 +273,9 @@ describe("getMailList pagination", () => {
 
   it("fetches page 1 with a Gmail pageToken and warms metadata", async () => {
     const cached = makeRows(50);
-    mockList.mockResolvedValueOnce(cached).mockResolvedValueOnce(cached);
-    mockCount.mockResolvedValueOnce(50);
+    // buildPageFromDB unfiltered: read fetchLimit
+    mockList.mockResolvedValueOnce(cached);
+    mockCount.mockResolvedValueOnce(100);
 
     const newApiRows = makeRows(50).map((r, i) => ({
       id: `p2_${i.toString().padStart(3, "0")}`,
@@ -198,10 +285,7 @@ describe("getMailList pagination", () => {
       messages: newApiRows,
       nextPageToken: "page_2_token",
     });
-    mockApiMessagesGet.mockResolvedValue({});
-
-    const refreshedRows = [...cached, ...makeRows(50)];
-    mockList.mockResolvedValueOnce(refreshedRows);
+    mockGmailFetchFor(makeRows(50));
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({
@@ -216,7 +300,7 @@ describe("getMailList pagination", () => {
       pageToken: "page_1_token",
       labelIds: ["INBOX"],
     });
-    expect(mockApiMessagesGet).toHaveBeenCalledTimes(50);
+    expect(mockFetch).toHaveBeenCalledTimes(50);
     expect(result.source).toBe("live");
     expect(result.nextPageToken).toBe("page_2_token");
   });
@@ -246,7 +330,7 @@ describe("getMailList pagination", () => {
       messages: apiRows,
       nextPageToken: null,
     });
-    mockApiMessagesGet.mockResolvedValue({});
+    mockGmailFetchFor(makeRows(50));
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({
@@ -260,17 +344,24 @@ describe("getMailList pagination", () => {
   });
 
   it("clamps pageSize to the 1..100 range", async () => {
-    mockList
-      .mockResolvedValueOnce(makeRows(50))
-      .mockResolvedValueOnce(makeRows(1));
-    mockCount.mockResolvedValue(50);
+    // pageSize=5000 → clamped to 100
+    const bigRows = makeRows(100);
+    mockList.mockResolvedValueOnce(bigRows);
+    mockList.mockResolvedValueOnce(bigRows);
+    mockCount.mockResolvedValue(100);
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({
       pageIndex: 0,
       pageSize: 5000,
     });
-    expect(result.items).toHaveLength(50);
+    expect(result.items).toHaveLength(100);
+
+    // pageSize=0 → clamped to 1
+    const tinyRows = makeRows(1);
+    mockList.mockResolvedValueOnce(tinyRows);
+    mockList.mockResolvedValueOnce(tinyRows);
+    mockCount.mockResolvedValueOnce(1);
 
     const result2 = await getMailList({
       pageIndex: 0,
@@ -280,6 +371,7 @@ describe("getMailList pagination", () => {
   });
 
   it("clamps negative pageIndex to 0", async () => {
+    mockList.mockResolvedValueOnce(makeRows(50));
     mockList.mockResolvedValueOnce(makeRows(50));
     mockCount.mockResolvedValueOnce(50);
 
@@ -293,6 +385,7 @@ describe("getMailList pagination", () => {
     const validRows = makeRows(50);
     const invalidRow: Row = { data: {} };
     mockList.mockResolvedValueOnce([...validRows, invalidRow]);
+    mockList.mockResolvedValueOnce([...validRows, invalidRow]);
     mockCount.mockResolvedValueOnce(51);
 
     const { getMailList } = await import("@/server/mail");
@@ -304,7 +397,9 @@ describe("getMailList pagination", () => {
   });
 
   it("exposes a cache-page token when more rows exist locally beyond the page", async () => {
-    mockList.mockResolvedValueOnce(makeRows(50));
+    const rows = makeRows(50);
+    mockList.mockResolvedValueOnce(rows);
+    mockList.mockResolvedValueOnce(rows);
     mockCount.mockResolvedValueOnce(120);
 
     const { getMailList } = await import("@/server/mail");
@@ -315,6 +410,7 @@ describe("getMailList pagination", () => {
   });
 
   it("returns null nextPageToken when the cache holds exactly enough rows", async () => {
+    mockList.mockResolvedValueOnce(makeRows(50));
     mockList.mockResolvedValueOnce(makeRows(50));
     mockCount.mockResolvedValueOnce(50);
 
@@ -327,8 +423,9 @@ describe("getMailList pagination", () => {
 
   it("serves cache:N tokens from the local cache with no API call", async () => {
     const rows = makeRows(120);
-    mockList.mockResolvedValueOnce(rows).mockResolvedValueOnce(rows);
-    mockCount.mockResolvedValueOnce(120).mockResolvedValueOnce(120);
+    // getMailListFromCachePage unfiltered: read limit (100 for page=1)
+    mockList.mockResolvedValueOnce(rows);
+    mockCount.mockResolvedValueOnce(120);
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({
@@ -345,7 +442,7 @@ describe("getMailList pagination", () => {
   });
 
   it("returns an empty page for a cache:N token beyond the local count", async () => {
-    mockList.mockResolvedValueOnce(makeRows(50));
+    mockList.mockResolvedValueOnce([]);
     mockCount.mockResolvedValueOnce(50);
 
     const { getMailList } = await import("@/server/mail");
@@ -358,7 +455,8 @@ describe("getMailList pagination", () => {
   });
 
   it("propagates the Gmail pageToken from the warm-up call when present", async () => {
-    mockList.mockResolvedValueOnce([]).mockResolvedValueOnce(makeRows(50));
+    mockList.mockResolvedValueOnce([]);
+    mockList.mockResolvedValueOnce(makeRows(50));
     mockCount.mockResolvedValueOnce(50);
 
     const apiRows = makeRows(50).map((r) => ({
@@ -369,7 +467,7 @@ describe("getMailList pagination", () => {
       messages: apiRows,
       nextPageToken: "gmail_next_token",
     });
-    mockApiMessagesGet.mockResolvedValue({});
+    mockGmailFetchFor(makeRows(50));
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({ pageIndex: 0, pageSize: 50 });
@@ -379,7 +477,8 @@ describe("getMailList pagination", () => {
   });
 
   it("falls back to a cache-page token after warm-up when Gmail returned no token but more rows are cached", async () => {
-    mockList.mockResolvedValueOnce([]).mockResolvedValueOnce(makeRows(60));
+    mockList.mockResolvedValueOnce([]);
+    mockList.mockResolvedValueOnce(makeRows(60));
     mockCount.mockResolvedValueOnce(60);
 
     const apiRows = makeRows(50).map((r) => ({
@@ -390,7 +489,7 @@ describe("getMailList pagination", () => {
       messages: apiRows,
       nextPageToken: null,
     });
-    mockApiMessagesGet.mockResolvedValue({});
+    mockGmailFetchFor(makeRows(50));
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({ pageIndex: 0, pageSize: 50 });
