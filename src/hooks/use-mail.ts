@@ -179,6 +179,7 @@ export function useClearMailCache() {
         items: [],
         nextPageToken: null,
         source: "cache" as const,
+        totalCount: 0,
       });
       queryClient.invalidateQueries({ queryKey: mailKeys.all });
     },

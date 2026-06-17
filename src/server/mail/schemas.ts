@@ -7,6 +7,13 @@ export const MailAttachmentSchema = z.object({
   attachmentId: z.string(),
 });
 
+export const MailInlineImageSchema = z.object({
+  contentId: z.string(),
+  attachmentId: z.string().optional(),
+  mimeType: z.string(),
+  dataUri: z.string().optional(),
+});
+
 export const MailListItemSchema = z.object({
   id: z.string(),
   threadId: z.string(),
@@ -30,6 +37,7 @@ export const MailMessageSchema = z.object({
   bodyHtml: z.string().optional().default(""),
   bodyText: z.string().optional().default(""),
   attachments: z.array(MailAttachmentSchema).optional().default([]),
+  inlineImages: z.array(MailInlineImageSchema).optional().default([]),
 });
 
 export const MailLabelSchema = z.object({
@@ -55,6 +63,7 @@ export const MailListResponseSchema = z.object({
   items: z.array(MailListItemSchema),
   nextPageToken: z.string().nullable(),
   source: z.enum(["cache", "live"]),
+  totalCount: z.number().int().nonnegative().default(0),
 });
 
 export const MailThreadsQuerySchema = z.object({
@@ -82,6 +91,7 @@ export const InboxRefreshResponseSchema = z.object({
 export const MailLabelsResponseSchema = z.array(MailLabelSchema);
 
 export type MailAttachment = z.infer<typeof MailAttachmentSchema>;
+export type MailInlineImage = z.infer<typeof MailInlineImageSchema>;
 export type MailListItem = z.infer<typeof MailListItemSchema>;
 export type MailMessage = z.infer<typeof MailMessageSchema>;
 export type MailLabel = z.infer<typeof MailLabelSchema>;

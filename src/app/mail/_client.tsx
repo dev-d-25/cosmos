@@ -88,7 +88,7 @@ export function MailInterface({
 
   const threadsQuery = useMailThreads({
     page: pageIndex,
-    pageSize: 25,
+    pageSize: 50,
     token: currentPageToken,
     labelIds: gmailParams.labelIds,
     q: gmailParams.query,
@@ -137,7 +137,11 @@ export function MailInterface({
   })();
 
   const hasMore = threadsQuery.data?.nextPageToken !== null && threadsQuery.data?.nextPageToken !== undefined;
-  const totalPages = Math.max(1, pageIndex + 1 + (hasMore ? 1 : 0));
+  const totalCount = threadsQuery.data?.totalCount ?? 0;
+  const pageSize = 50;
+  const totalPages = totalCount > 0
+    ? Math.ceil(totalCount / pageSize)
+    : Math.max(1, pageIndex + 1 + (hasMore ? 1 : 0));
 
   const labels: MailLabel[] = labelsQuery.data ?? [];
   const profile: MailProfile | null = profileQuery.data ?? null;
@@ -247,6 +251,7 @@ export function MailInterface({
     onOpen,
     onClose,
     onMailAction,
+    navigate: (url: string) => router.push(url),
     composeOpen,
     shortcutsOpen,
     setShortcutsOpen,
