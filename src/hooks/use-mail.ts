@@ -127,7 +127,7 @@ export function useMailThreads(opts: {
     queryFn: () => fetchMailThreads(opts),
     initialData: opts.initialData,
     placeholderData: (prev) => prev,
-    staleTime: 30_000,
+    staleTime: 5 * 60 * 1000,
   });
 }
 
@@ -137,6 +137,7 @@ export function useMailMessage(id: string | null) {
     queryFn: () => fetchMailMessage(id!),
     enabled: !!id,
     placeholderData: (prev) => prev,
+    staleTime: 5 * 60 * 1000,
   });
 }
 

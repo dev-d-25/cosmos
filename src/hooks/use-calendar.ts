@@ -121,7 +121,7 @@ export function useCalendarEvents(opts: {
     queryFn: () => fetchCalendarEvents(opts),
     initialData: opts.initialData,
     placeholderData: (prev) => prev,
-    staleTime: 30_000,
+    staleTime: 5 * 60 * 1000,
   });
 }
 
