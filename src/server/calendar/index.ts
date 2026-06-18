@@ -162,6 +162,8 @@ export async function createCalendarEvent(input: {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
 
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
   const event = await ctx.client.googlecalendar.api.events.create({
     calendarId: "primary",
     sendUpdates: input.sendUpdates ?? "all",
@@ -172,10 +174,10 @@ export async function createCalendarEvent(input: {
       status: "confirmed",
       start: input.isAllDay
         ? { date: input.start.split("T")[0] }
-        : { dateTime: input.start },
+        : { dateTime: input.start, timeZone },
       end: input.isAllDay
         ? { date: input.end.split("T")[0] }
-        : { dateTime: input.end },
+        : { dateTime: input.end, timeZone },
       attendees: input.attendees?.map((email) => ({ email })),
       colorId: input.colorId,
       visibility: input.visibility,
@@ -237,15 +239,17 @@ export async function updateCalendarEvent(input: {
   if (input.attendees !== undefined) {
     fields.attendees = input.attendees.map((email) => ({ email }));
   }
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
   if (input.start !== undefined) {
     fields.start = input.isAllDay
       ? { date: input.start.split("T")[0] }
-      : { dateTime: input.start };
+      : { dateTime: input.start, timeZone };
   }
   if (input.end !== undefined) {
     fields.end = input.isAllDay
       ? { date: input.end.split("T")[0] }
-      : { dateTime: input.end };
+      : { dateTime: input.end, timeZone };
   }
 
   const event = await ctx.client.googlecalendar.api.events.update({
