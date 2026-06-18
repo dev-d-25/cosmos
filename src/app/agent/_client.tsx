@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { ChatPanelProvider, useChatPanel } from "@/components/chat/chat-panel-provider";
@@ -20,84 +20,10 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { MailTopNav } from "@/components/mail/mail-top-nav";
 import { PanelLeftIcon, PenSquareIcon } from "lucide-react";
+import {
+  convertDbMessagesToUIMessages,
+} from "@/lib/chat/message-converter";
 import type { UIMessage } from "@ai-sdk/react";
-
-function convertDbMessagesToUIMessages(dbMessages: unknown[]): UIMessage[] {
-  const result: UIMessage[] = [];
-  for (const raw of dbMessages) {
-    const msg = raw as {
-      id: string;
-      role: string;
-      parts: unknown;
-      model?: string | null;
-    };
-
-    if (msg.role === "user") {
-      result.push({
-        id: msg.id,
-        role: "user",
-        parts: Array.isArray(msg.parts) ? msg.parts : [],
-      } as UIMessage);
-      continue;
-    }
-
-    if (msg.role === "assistant") {
-      const uiParts: UIMessage["parts"] = [];
-      const modelMsgs = Array.isArray(msg.parts) ? msg.parts : [];
-
-      for (const m of modelMsgs) {
-        const mm = m as { role?: string; content?: unknown[] };
-        if (!Array.isArray(mm.content)) continue;
-        for (const c of mm.content) {
-          const part = c as Record<string, unknown>;
-          if (part.type === "text" && typeof part.text === "string") {
-            uiParts.push({ type: "text", text: part.text } as UIMessage["parts"][number]);
-          } else if (part.type === "tool-call") {
-            uiParts.push({
-              type: `tool-${part.toolName}`,
-              toolCallId: part.toolCallId,
-              state: "output-available",
-              input: part.args ?? part.input,
-              output: undefined,
-            } as UIMessage["parts"][number]);
-          }
-        }
-        if (mm.role === "tool" && Array.isArray(mm.content)) {
-          for (const c of mm.content) {
-            const part = c as Record<string, unknown>;
-            if (part.type === "tool-result") {
-              uiParts.push({
-                type: `tool-${part.toolName ?? "unknown"}`,
-                toolCallId: part.toolCallId,
-                state: "output-available",
-                input: undefined,
-                output: part.result ?? part.output,
-              } as UIMessage["parts"][number]);
-            }
-          }
-        }
-      }
-
-      if (uiParts.length === 0) {
-        uiParts.push({ type: "text", text: "" } as UIMessage["parts"][number]);
-      }
-
-      result.push({
-        id: msg.id,
-        role: "assistant",
-        parts: uiParts,
-      } as UIMessage);
-      continue;
-    }
-
-    result.push({
-      id: msg.id,
-      role: msg.role as "user" | "assistant" | "system",
-      parts: Array.isArray(msg.parts) ? msg.parts : [],
-    } as UIMessage);
-  }
-  return result;
-}
 
 function AgentInner() {
   const router = useRouter();
@@ -108,6 +34,28 @@ function AgentInner() {
     model,
     setModel,
   } = useChatPanel();
+
+  const hasInitializedFromUrl = useRef(false);
+  useEffect(() => {
+    if (hasInitializedFromUrl.current) return;
+    hasInitializedFromUrl.current = true;
+    const params = new URLSearchParams(window.location.search);
+    const urlThreadId = params.get("thread");
+    if (urlThreadId) {
+      setActiveThreadId(urlThreadId);
+    }
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (activeThreadId) {
+      params.set("thread", activeThreadId);
+    } else {
+      params.delete("thread");
+    }
+    const qs = params.toString();
+    window.history.replaceState(null, "", qs ? `/agent?${qs}` : "/agent");
+  }, [activeThreadId]);
 
   const threadsQuery = useChatThreads();
   const threadQuery = useChatThread(activeThreadId);
@@ -123,10 +71,16 @@ function AgentInner() {
   const [input, setInput] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
+  const convertedThreadMessages = useMemo(
+    () => convertDbMessagesToUIMessages(threadMessages),
+    [threadMessages],
+  );
+
   const onSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
       if (!input.trim()) return;
+      if (chat.status === "streaming" || chat.status === "submitted") return;
 
       let threadId = activeThreadId;
 
@@ -169,26 +123,39 @@ function AgentInner() {
       });
       setActiveThreadId(newThread.id);
       setInput("");
-      chat.setMessages([]);
     } catch (err) {
       console.error("[agent] handleNewThread failed:", err);
       toast.error("Failed to create new thread");
     }
-  }, [createThread, model, setActiveThreadId, chat]);
+  }, [createThread, model, setActiveThreadId]);
 
   const handleDeleteThread = useCallback(
     (id: string) => {
       deleteThread.mutate(id);
       if (activeThreadId === id) {
         startNewThread();
-        chat.setMessages([]);
       }
     },
-    [deleteThread, activeThreadId, startNewThread, chat],
+    [deleteThread, activeThreadId, startNewThread],
+  );
+
+  const handleSelectThread = useCallback(
+    (id: string) => {
+      if (
+        activeThreadId &&
+        (chat.status === "streaming" || chat.status === "submitted")
+      ) {
+        chat.stop();
+      }
+      setActiveThreadId(id);
+    },
+    [activeThreadId, chat, setActiveThreadId],
   );
 
   const handleSendDirect = useCallback(
     async (text: string) => {
+      if (chat.status === "streaming" || chat.status === "submitted") return;
+
       let threadId = activeThreadId;
 
       if (!threadId) {
@@ -212,15 +179,17 @@ function AgentInner() {
     [activeThreadId, model, chat, createThread, setActiveThreadId, persistMessage],
   );
 
-  const convertedThreadMessages = useMemo(
-    () => convertDbMessagesToUIMessages(threadMessages),
-    [threadMessages],
-  );
+  const isStreaming = chat.status === "streaming" || chat.status === "submitted";
 
   const allMessages = useMemo(() => {
-    if (chat.messages.length > 0) return chat.messages;
-    return convertedThreadMessages;
-  }, [chat.messages, convertedThreadMessages]);
+    if (isStreaming && chat.messages.length > 0) {
+      return chat.messages;
+    }
+    if (convertedThreadMessages.length > 0) {
+      return convertedThreadMessages;
+    }
+    return chat.messages;
+  }, [chat.messages, convertedThreadMessages, isStreaming]);
 
   return (
     <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
@@ -249,6 +218,7 @@ function AgentInner() {
                 variant="outline"
                 className="w-full justify-start gap-2"
                 onClick={handleNewThread}
+                disabled={isStreaming}
               >
                 <PenSquareIcon className="size-4" />
                 <span className="text-[13px]">New chat</span>
@@ -260,10 +230,7 @@ function AgentInner() {
               <ChatThreadsList
                 threads={threads}
                 activeThreadId={activeThreadId}
-                onSelect={(id) => {
-                  setActiveThreadId(id);
-                  chat.setMessages([]);
-                }}
+                onSelect={handleSelectThread}
                 onDelete={handleDeleteThread}
               />
             </ScrollArea>
@@ -287,6 +254,7 @@ function AgentInner() {
                     size="icon"
                     className="size-7"
                     onClick={() => setSidebarOpen(!sidebarOpen)}
+                    disabled={isStreaming}
                   />
                 }
               >
@@ -309,6 +277,7 @@ function AgentInner() {
             onSend={handleSendDirect}
             status={chat.status}
             stop={chat.stop}
+            disabled={isStreaming}
           />
         </div>
       </div>
