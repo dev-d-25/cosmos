@@ -6,21 +6,19 @@ import { useCallback, useRef } from "react";
 import { toast } from "sonner";
 
 export function useChat(threadId: string | null, model: string) {
-  const threadIdRef = useRef(threadId);
-  threadIdRef.current = threadId;
-
   const modelRef = useRef(model);
   modelRef.current = model;
 
   const transport = new DefaultChatTransport({
     api: "/api/chat",
-    body: () => {
-      const body = {
-        threadId: threadIdRef.current,
-        model: modelRef.current,
+    prepareSendMessagesRequest: ({ id, messages }) => {
+      return {
+        body: {
+          threadId: id,
+          message: messages[messages.length - 1],
+          model: modelRef.current,
+        },
       };
-      console.log("[chat] transport body:", body);
-      return body;
     },
   });
 
@@ -33,7 +31,6 @@ export function useChat(threadId: string | null, model: string) {
     },
   });
 
-  // Use a ref to always access the latest sendMessage, avoiding stale closures
   const sendMessageRef = useRef(chat.sendMessage);
   sendMessageRef.current = chat.sendMessage;
 
@@ -49,12 +46,9 @@ export function useChat(threadId: string | null, model: string) {
         threadId: string;
       },
     ) => {
-      // Force-ref the threadId so the transport body picks it up immediately
-      threadIdRef.current = opts.threadId;
       console.log("[chat] sendWithPersist:", { text, threadId: opts.threadId });
 
       try {
-        // Persist user message to DB so it survives refresh
         const id = crypto.randomUUID();
         await opts.persistMessage({
           threadId: opts.threadId,
@@ -68,8 +62,7 @@ export function useChat(threadId: string | null, model: string) {
         throw err;
       }
 
-      // Send via AI SDK — use ref to avoid stale closure
-      console.log("[chat] calling sendMessage, threadIdRef:", threadIdRef.current);
+      console.log("[chat] calling sendMessage");
       sendMessageRef.current({ text });
     },
     [],
