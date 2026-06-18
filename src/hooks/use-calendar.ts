@@ -50,6 +50,7 @@ async function createCalendarEventApi(input: {
   start: string;
   end: string;
   isAllDay?: boolean;
+  colorId?: string;
   attendees?: string[];
 }): Promise<{ id: string; htmlLink: string }> {
   const res = await fetch("/api/calendar/events", {
