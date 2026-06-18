@@ -6,3 +6,6 @@ allowBuilds:
   esbuild: true
   sharp: true
   unrs-resolver: true
+
+patchedDependencies:
+  '@corsair-dev/gmail@0.1.4': patches/@corsair-dev__gmail@0.1.4.patch

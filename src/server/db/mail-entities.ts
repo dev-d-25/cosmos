@@ -58,6 +58,12 @@ export interface UpsertItem {
   data: RawMessageEntity;
 }
 
+function messageOrderExpr(orderBy: "created_at" | "internal_date") {
+  return orderBy === "internal_date"
+    ? sql`(data->>'internalDate')::bigint DESC NULLS LAST, created_at DESC`
+    : sql`created_at DESC`;
+}
+
 /**
  * Batch upsert using native PostgreSQL INSERT ... ON CONFLICT.
  * One round-trip regardless of N items.
@@ -116,13 +122,8 @@ export async function listByLabel(
     orderBy?: "created_at" | "internal_date";
   } = {},
 ): Promise<MailEntityRow[]> {
-  const { limit = 50, offset = 0, orderBy = "created_at" } = options;
+  const { limit = 50, offset = 0, orderBy = "internal_date" } = options;
   const labelJson = JSON.stringify(labelIds);
-
-  const orderExpr =
-    orderBy === "internal_date"
-      ? sql`(data->>'internalDate')::bigint DESC NULLS LAST`
-      : sql`created_at DESC`;
 
   const rows = await db
     .select()
@@ -134,7 +135,33 @@ export async function listByLabel(
         sql`${corsairEntities.data}->'labelIds' @> ${labelJson}::jsonb`,
       ),
     )
-    .orderBy(orderExpr)
+    .orderBy(messageOrderExpr(orderBy))
+    .limit(limit)
+    .offset(offset);
+
+  return rows.map(parseRow);
+}
+
+export async function listMessages(
+  accountId: string,
+  options: {
+    limit?: number;
+    offset?: number;
+    orderBy?: "created_at" | "internal_date";
+  } = {},
+): Promise<MailEntityRow[]> {
+  const { limit = 50, offset = 0, orderBy = "internal_date" } = options;
+
+  const rows = await db
+    .select()
+    .from(corsairEntities)
+    .where(
+      and(
+        eq(corsairEntities.accountId, accountId),
+        eq(corsairEntities.entityType, MESSAGE_ENTITY_TYPE),
+      ),
+    )
+    .orderBy(messageOrderExpr(orderBy))
     .limit(limit)
     .offset(offset);
 

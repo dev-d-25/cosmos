@@ -152,7 +152,8 @@ export function toListItem(row: { data: Record<string, unknown> }): MailListItem
   const threadId = (d.threadId as string | undefined) ?? "";
 
   // Extract subject: prefer pre-extracted field, then payload headers, then snippet
-  const subject = (d.subject as string | undefined)
+  // Use || instead of ?? so empty strings fall through to the header lookup
+  const subject = (d.subject as string | undefined || undefined)
     ?? getHeader(
         (d.payload as { headers?: Array<{ name?: string; value?: string }> })?.headers,
         "Subject",
@@ -161,7 +162,8 @@ export function toListItem(row: { data: Record<string, unknown> }): MailListItem
     ?? "";
 
   // Extract from: prefer pre-extracted field, then payload headers
-  const from = (d.from as string | undefined)
+  // Use || instead of ?? so empty strings fall through to the header lookup
+  const from = (d.from as string | undefined || undefined)
     ?? getHeader(
         (d.payload as { headers?: Array<{ name?: string; value?: string }> })?.headers,
         "From",
@@ -177,7 +179,7 @@ export function toListItem(row: { data: Record<string, unknown> }): MailListItem
     from,
     snippet,
     receivedAt,
-    unread: labelIds.includes("UNREAD"),
+    unread: labelIds.includes("UNREAD") || d.unread === true,
     labelIds,
   };
 }

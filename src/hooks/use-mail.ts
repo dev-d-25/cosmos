@@ -128,7 +128,11 @@ export function useMailThreads(opts: {
     initialData: opts.initialData,
     placeholderData: (prev) => prev,
     // Shorter staleTime so background-sync results show up promptly.
-    staleTime: 30 * 1000,
+    staleTime: opts.initialData?.source === "cache" && opts.initialData.items.length === 0 ? 0 : 30 * 1000,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      return data?.source === "cache" && data.items.length === 0 ? 2_500 : false;
+    },
     refetchOnWindowFocus: true,
   });
 }
