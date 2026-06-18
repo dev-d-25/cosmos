@@ -50,7 +50,7 @@ export function ChatComposer({
 
   return (
     <div className={cn("", className)}>
-      <div className="bg-muted/50 border-border relative rounded-xl border shadow-sm">
+      <div className="bg-card/70 border-border/30 focus-within:ring-1 focus-within:ring-ring/30 relative rounded-none border shadow-[var(--shadow-composer)] transition-shadow">
         <textarea
           ref={textareaRef}
           value={input}
@@ -59,7 +59,7 @@ export function ChatComposer({
           placeholder="Message..."
           rows={1}
           disabled={disabled}
-          className="min-h-[36px] max-h-[160px] w-full resize-none bg-transparent px-3 py-2 pr-10 text-[13px] leading-[1.5] outline-none placeholder:text-muted-foreground disabled:opacity-50"
+          className="min-h-[40px] max-h-[160px] w-full resize-none bg-transparent px-3 py-2.5 pr-10 text-[13px] leading-[1.5] outline-none placeholder:text-muted-foreground/35 disabled:opacity-50"
         />
         <div className="absolute right-1.5 bottom-1.5">
           {isStreaming ? (
@@ -67,7 +67,7 @@ export function ChatComposer({
               type="button"
               variant="secondary"
               size="icon"
-              className="size-7 rounded-lg"
+              className="size-7 rounded-none"
               onClick={stop}
             >
               <Square className="size-3 fill-current" />
@@ -77,7 +77,7 @@ export function ChatComposer({
               type="button"
               size="icon"
               disabled={!input.trim() || disabled}
-              className="size-7 rounded-lg"
+              className="size-7 rounded-none bg-primary text-primary-foreground"
               onClick={() => {
                 if (input.trim()) {
                   onSubmit({ preventDefault: () => {} } as React.FormEvent);

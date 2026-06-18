@@ -27,7 +27,7 @@ export function ChatEmptyState({ onQueryClick, onSend }: ChatEmptyStateProps) {
           <button
             key={query}
             onClick={() => onSend(query)}
-            className="border-border/50 bg-card/30 hover:bg-card/60 hover:text-foreground min-w-[200px] shrink-0 rounded-xl border px-4 py-3 text-left text-[13px] leading-relaxed text-muted-foreground transition-all duration-200 hover:-translate-y-0.5 hover:shadow-sm sm:min-w-0 sm:shrink sm:whitespace-normal"
+            className="border-border/50 bg-card/30 hover:bg-card/60 hover:text-foreground min-w-[200px] shrink-0 rounded-none border px-4 py-3 text-left text-[13px] leading-relaxed text-muted-foreground transition-all duration-200 hover:-translate-y-0.5 hover:shadow-sm sm:min-w-0 sm:shrink sm:whitespace-normal"
           >
             {query}
           </button>

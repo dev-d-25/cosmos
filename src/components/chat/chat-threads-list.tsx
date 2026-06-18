@@ -44,7 +44,7 @@ export function ChatThreadsList({
       </div>
 
       <ScrollArea className="flex-1">
-        <div className="flex flex-col gap-0.5 px-1">
+        <div className="flex flex-col gap-1.5 px-2">
           {threads.length === 0 && (
             <p className="text-muted-foreground px-2 py-4 text-center text-xs">
               No conversations yet
@@ -55,16 +55,16 @@ export function ChatThreadsList({
               key={thread.id}
               onClick={() => onSelect(thread.id)}
               className={cn(
-                "group flex cursor-pointer items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors",
+                "group flex cursor-pointer items-start gap-2.5 rounded-none border px-3 py-2.5 text-left transition-all duration-150",
                 activeThreadId === thread.id
-                  ? "bg-accent"
-                  : "hover:bg-accent/50",
+                  ? "border-primary/40 bg-accent shadow-sm"
+                  : "border-border/40 bg-card/30 hover:border-border/70 hover:bg-accent/40",
               )}
             >
               <MessageSquare className="text-muted-foreground mt-0.5 size-3.5 shrink-0" />
               <div className="min-w-0 flex-1">
-                <p className="truncate text-xs font-medium">{thread.title}</p>
-                <p className="text-muted-foreground text-[10px]">
+                <p className="truncate text-xs font-medium leading-snug">{thread.title}</p>
+                <p className="text-muted-foreground mt-0.5 text-[10px]">
                   {formatTime(thread.updatedAt)}
                 </p>
               </div>
