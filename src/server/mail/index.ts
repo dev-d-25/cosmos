@@ -118,11 +118,18 @@ async function enrichStubs(
     chunks.push(needsEnrichment.slice(i, i + ENRICH_CONCURRENCY));
   }
 
-  // Get an access token once for all requests (it's valid for ~1 hour).
-  const accessToken = await client.gmail.keys.get_access_token();
+  // Get an access token with retry — on cold start the token may need
+  // to be refreshed from the DB, which can take a moment.
+  let accessToken: string | null = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    accessToken = await client.gmail.keys.get_access_token();
+    if (accessToken) break;
+    console.log(`[mail] enrichStubs: no access token on attempt ${attempt + 1}, retrying in 1s...`);
+    await new Promise((r) => setTimeout(r, 1000));
+  }
   if (!accessToken) {
-    console.log(
-      `[mail] Enriched 0/${ids.length} — no access token available; ${needsEnrichment.length} stubs will remain unenriched`,
+    console.error(
+      `[mail] Enriched 0/${needsEnrichment.length} — no access token after 3 attempts; stubs will remain unenriched`,
     );
     return;
   }
@@ -142,15 +149,28 @@ async function enrichStubs(
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const raw = (await res.json()) as Record<string, unknown>;
+
+        // ── TEMP DEBUG ──
+        if (id === needsEnrichment[0]) {
+          console.log(
+            `[mail] DEBUG raw response keys=${Object.keys(raw).join(",")} payloadKeys=${raw.payload ? Object.keys(raw.payload as object).join(",") : "MISSING"} headers=${(raw.payload as { headers?: unknown[] })?.headers ? "present" : "MISSING"}`,
+          );
+          const hdrs = (raw.payload as { headers?: Array<{ name: string; value: string }> })?.headers;
+          if (hdrs) {
+            console.log(`[mail] DEBUG header names: ${hdrs.map((h) => h.name).join("|")}`);
+          }
+        }
+
         return { id, raw };
       }),
     );
 
-    results.forEach((r) => {
+    results.forEach((r, i) => {
       if (r.status === "fulfilled") {
         succeeded++;
       } else {
         failed++;
+        console.warn(`[mail] enrichStubs: failed for chunk item: ${describeError(r.reason)}`);
       }
     });
 
@@ -190,14 +210,14 @@ async function enrichStubs(
       try {
         await upsertManyByEntityIds(accountId, upsertItems);
       } catch (err) {
-        console.log(`[mail] bulk upsert failed (${upsertItems.length} items): ${describeError(err)}`);
+        console.error(`[mail] bulk upsert failed (${upsertItems.length} items): ${describeError(err)}`);
       }
     }
   }
 
   const elapsed = Date.now() - t0;
   console.log(
-    `[mail] Enriched ${needsEnrichment.length}/${ids.length} | succeeded=${succeeded} failed=${failed} in ${elapsed}ms`,
+    `[mail] Enriched ${succeeded}/${needsEnrichment.length} | failed=${failed} in ${elapsed}ms`,
   );
 }
 
