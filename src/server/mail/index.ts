@@ -265,22 +265,34 @@ async function syncLabelFromGmail(
   q?: string,
 ): Promise<{ nextPageToken: string | null; resultSizeEstimate: number | null }> {
   const t0 = Date.now();
-  const listResult = await client.gmail.api.messages.list({
-    userId: "me",
-    maxResults: limit,
-    ...(labelIds?.length ? { labelIds } : {}),
-    ...(q ? { q, includeSpamTrash: true } : {}),
-  });
+  let listResult: Record<string, unknown>;
+  try {
+    listResult = (await client.gmail.api.messages.list({
+      userId: "me",
+      maxResults: limit,
+      ...(labelIds?.length ? { labelIds } : {}),
+      ...(q ? { q, includeSpamTrash: true } : {}),
+    })) as Record<string, unknown>;
+  } catch (err) {
+    console.error(`[mail] syncLabelFromGmail: Gmail API error: ${describeError(err)}`);
+    return { nextPageToken: null, resultSizeEstimate: null };
+  }
 
-  const ids = (listResult.messages ?? [])
+  if (!listResult || Object.keys(listResult).length === 0) {
+    console.error(`[mail] syncLabelFromGmail: empty response from Gmail API`);
+    return { nextPageToken: null, resultSizeEstimate: null };
+  }
+
+  const messages = (listResult.messages ?? []) as Array<{ id?: string }>;
+  const ids = messages
     .map((m) => m.id)
     .filter((id): id is string => !!id);
 
   console.log(
-    `[mail] syncLabelFromGmail: got ${ids.length} IDs from Gmail in ${Date.now() - t0}ms (resultSizeEstimate=${listResult.resultSizeEstimate ?? "n/a"})`,
+    `[mail] syncLabelFromGmail: got ${ids.length} IDs from Gmail in ${Date.now() - t0}ms (resultSizeEstimate=${(listResult.resultSizeEstimate as number | null) ?? "n/a"})`,
   );
 
-  const resultSizeEstimate = listResult.resultSizeEstimate ?? null;
+  const resultSizeEstimate = (listResult.resultSizeEstimate as number | null) ?? null;
 
   if (ids.length === 0) {
     return { nextPageToken: null, resultSizeEstimate };
@@ -290,7 +302,7 @@ async function syncLabelFromGmail(
 
   return {
     nextPageToken:
-      ids.length >= limit ? (listResult.nextPageToken ?? null) : null,
+      ids.length >= limit ? ((listResult.nextPageToken as string | null) ?? null) : null,
     resultSizeEstimate,
   };
 }
@@ -357,15 +369,27 @@ async function getMailListFromQuery(
   pageSize: number,
   labelIds: string[],
 ): Promise<MailListResponse> {
-  const apiResult = await client.gmail.api.messages.list({
-    userId: "me",
-    maxResults: pageSize,
-    pageToken: opts.pageToken ?? undefined,
-    q: opts.q!,
-    includeSpamTrash: true,
-  });
+  let apiResult: Record<string, unknown>;
+  try {
+    apiResult = (await client.gmail.api.messages.list({
+      userId: "me",
+      maxResults: pageSize,
+      pageToken: opts.pageToken ?? undefined,
+      q: opts.q!,
+      includeSpamTrash: true,
+    })) as Record<string, unknown>;
+  } catch (err) {
+    console.error(`[mail] getMailListFromQuery: Gmail API error for q="${opts.q}": ${describeError(err)}`);
+    return { items: [], nextPageToken: null, source: "live", totalCount: 0 };
+  }
 
-  const ids = (apiResult.messages ?? [])
+  if (!apiResult || Object.keys(apiResult).length === 0) {
+    console.error(`[mail] getMailListFromQuery: empty response from Gmail API for q="${opts.q}"`);
+    return { items: [], nextPageToken: null, source: "live", totalCount: 0 };
+  }
+
+  const messages = (apiResult.messages ?? []) as Array<{ id?: string }>;
+  const ids = messages
     .map((m) => m.id)
     .filter((id): id is string => !!id);
 
@@ -393,9 +417,9 @@ async function getMailListFromQuery(
 
   return {
     items,
-    nextPageToken: apiResult.nextPageToken ?? null,
+    nextPageToken: (apiResult.nextPageToken as string | null) ?? null,
     source: "live",
-    totalCount: apiResult.resultSizeEstimate ?? 0,
+    totalCount: (apiResult.resultSizeEstimate as number) ?? 0,
   };
 }
 
