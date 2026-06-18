@@ -1,7 +1,10 @@
 "use client";
 
-import { ChevronDownIcon, WrenchIcon, CheckCircle2, XCircle, Loader2 } from "lucide-react";
+import { useState } from "react";
+import { ChevronDownIcon, WrenchIcon, CheckCircle2, XCircle, Loader2, Mail, Calendar, Tag } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
+import { Badge } from "@/components/ui/badge";
 
 interface ToolPart {
   type: string;
@@ -27,74 +30,90 @@ function getToolLabel(toolType: string): string {
 function getToolIcon(toolType: string) {
   const name = toolType.replace(/^tool-/, "");
   if (name.includes("gmail") || name.includes("mail") || name.includes("send") || name.includes("email")) {
-    return "📧";
+    return <Mail className="size-3.5" />;
   }
   if (name.includes("calendar") || name.includes("event") || name.includes("schedule")) {
-    return "📅";
+    return <Calendar className="size-3.5" />;
   }
   if (name.includes("label")) {
-    return "🏷️";
+    return <Tag className="size-3.5" />;
   }
-  return null;
+  return <WrenchIcon className="size-3.5" />;
 }
 
 export function ChatToolPart({ part }: { part: ToolPart }) {
+  const [isOpen, setIsOpen] = useState(false);
   const isComplete = part.state === "output-available";
   const isError = part.state === "output-error";
   const isActive =
     part.state === "input-streaming" || part.state === "input-available";
 
   const label = getToolLabel(part.type);
-  const emoji = getToolIcon(part.type);
+  const icon = getToolIcon(part.type);
 
   return (
-    <details className="group rounded-md border border-border bg-muted/30 px-3 py-2 text-xs">
-      <summary className="flex cursor-pointer items-center gap-2 select-none">
-        {isActive ? (
-          <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
-        ) : isComplete ? (
-          <CheckCircle2 className="size-3.5 text-green-500" />
-        ) : isError ? (
-          <XCircle className="size-3.5 text-destructive" />
-        ) : (
-          <WrenchIcon className="size-3.5 text-muted-foreground" />
-        )}
-        {emoji && <span className="text-xs">{emoji}</span>}
-        <code className="font-medium">{label}</code>
-        <span className="text-muted-foreground ml-auto text-[10px]">
-          {isComplete ? "Done" : isError ? "Error" : isActive ? "Running..." : "Pending"}
-        </span>
-        <ChevronDownIcon className="size-3.5 transition-transform group-open:rotate-180" />
-      </summary>
-      <div className="mt-2 space-y-2">
-        {part.input != null && (
-          <div>
-            <p className="text-muted-foreground mb-1 text-[10px] font-medium uppercase tracking-wider">
-              Input
-            </p>
-            <pre className="bg-background/50 overflow-x-auto rounded p-2 text-[11px]">
-              <code>{JSON.stringify(part.input, null, 2)}</code>
-            </pre>
+    <Collapsible open={isOpen} onOpenChange={setIsOpen}>
+      <div className="rounded-none border border-border/50 bg-muted/20 text-xs">
+        <CollapsibleTrigger className="flex w-full cursor-pointer items-center gap-2 px-3 py-2 select-none">
+          <span className="text-muted-foreground shrink-0">
+            {isActive ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : isComplete ? (
+              <CheckCircle2 className="size-3.5 text-green-500" />
+            ) : isError ? (
+              <XCircle className="size-3.5 text-destructive" />
+            ) : (
+              icon
+            )}
+          </span>
+          <span className="text-foreground/80 min-w-0 flex-1 truncate text-left">
+            {label}
+          </span>
+          <Badge
+            variant={isError ? "destructive" : "secondary"}
+            className="shrink-0 text-[10px]"
+          >
+            {isComplete ? "Done" : isError ? "Error" : isActive ? "Running" : "Pending"}
+          </Badge>
+          <ChevronDownIcon
+            className={cn(
+              "size-3.5 shrink-0 text-muted-foreground transition-transform",
+              isOpen && "rotate-180",
+            )}
+          />
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <div className="space-y-2 border-t border-border/30 px-3 py-2">
+            {part.input != null && (
+              <div>
+                <p className="text-muted-foreground mb-1 text-[10px] font-medium uppercase tracking-wider">
+                  Input
+                </p>
+                <pre className="bg-background/50 overflow-x-auto rounded-none p-2 font-mono text-[11px]">
+                  <code>{JSON.stringify(part.input, null, 2)}</code>
+                </pre>
+              </div>
+            )}
+            {part.output != null && (
+              <div>
+                <p className="text-muted-foreground mb-1 text-[10px] font-medium uppercase tracking-wider">
+                  Output
+                </p>
+                <pre className="bg-background/50 overflow-x-auto rounded-none p-2 font-mono text-[11px]">
+                  <code>
+                    {typeof part.output === "string"
+                      ? part.output
+                      : JSON.stringify(part.output, null, 2)}
+                  </code>
+                </pre>
+              </div>
+            )}
+            {isError && part.errorText && (
+              <p className="text-destructive text-xs">{part.errorText}</p>
+            )}
           </div>
-        )}
-        {part.output != null && (
-          <div>
-            <p className="text-muted-foreground mb-1 text-[10px] font-medium uppercase tracking-wider">
-              Output
-            </p>
-            <pre className="bg-background/50 overflow-x-auto rounded p-2 text-[11px]">
-              <code>
-                {typeof part.output === "string"
-                  ? part.output
-                  : JSON.stringify(part.output, null, 2)}
-              </code>
-            </pre>
-          </div>
-        )}
-        {isError && part.errorText && (
-          <p className="text-destructive text-xs">{part.errorText}</p>
-        )}
+        </CollapsibleContent>
       </div>
-    </details>
+    </Collapsible>
   );
 }
