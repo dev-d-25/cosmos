@@ -28,8 +28,9 @@ import type {
 import { MAIL_LABELS } from "@/lib/mail/labels";
 
 const INBOX_LABEL = "INBOX";
-const DEFAULT_PAGE_SIZE = 50;
-const ENRICH_CONCURRENCY = 25;
+const DEFAULT_PAGE_SIZE = 20;
+
+const ENRICH_CONCURRENCY = 10;
 const CACHE_PAGE_TOKEN_PREFIX = "cache:";
 const FILTERED_LABEL_CACHE_FETCH_MULTIPLIER = 10;
 const FILTERED_LABEL_CACHE_FETCH_CAP = 1000;
@@ -114,11 +115,6 @@ async function enrichStubs(
   let succeeded = 0;
   let failed = 0;
 
-  const chunks: string[][] = [];
-  for (let i = 0; i < needsEnrichment.length; i += ENRICH_CONCURRENCY) {
-    chunks.push(needsEnrichment.slice(i, i + ENRICH_CONCURRENCY));
-  }
-
   const accessToken = await client.gmail.keys.get_access_token();
   if (!accessToken) {
     console.log(
@@ -127,72 +123,63 @@ async function enrichStubs(
     return;
   }
 
-  for (const chunk of chunks) {
-    const results = await Promise.allSettled(
-      chunk.map(async (id) => {
-        // ── Direct fetch to Gmail REST API ──
-        // The SDK's messages.get endpoint joins metadataHeaders into a single
-        // comma-separated param, but Gmail requires *repeated* params:
-        //   metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=To
-        // The comma-joined form is silently ignored → no headers returned.
-        // This direct call uses the correct format.
-        const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&${ENRICH_HEADERS.map((h) => `metadataHeaders=${encodeURIComponent(h)}`).join("&")}`;
-        const res = await fetch(url, {
-          headers: { Authorization: `Bearer ${accessToken}` },
-        });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const raw = (await res.json()) as Record<string, unknown>;
-        return { id, raw };
-      }),
-    );
+  const results = await Promise.allSettled(
+    needsEnrichment.map(async (id) => {
+      const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&${ENRICH_HEADERS.map((h) => `metadataHeaders=${encodeURIComponent(h)}`).join("&")}`;
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const raw = (await res.json()) as Record<string, unknown>;
+      return { id, raw };
+    }),
+  );
 
-    results.forEach((r) => {
-      if (r.status === "fulfilled") {
-        succeeded++;
-      } else {
-        failed++;
-        console.warn(`[mail] enrichStubs: failed for chunk item: ${describeError(r.reason)}`);
-      }
-    });
-
-    // ── Bulk persist successful results (1 query per chunk, ON CONFLICT) ──
-    const upsertItems: UpsertItem[] = [];
-    for (const r of results) {
-      if (r.status !== "fulfilled") continue;
-      const { id, raw } = r.value;
-      try {
-        const payload = raw.payload as
-          | { headers?: Array<{ name?: string; value?: string }> }
-          | undefined;
-        const headers = payload?.headers ?? [];
-        const get = (name: string) =>
-          headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value;
-        const subject = get("Subject");
-        const from = get("From");
-        const to = get("To");
-
-        upsertItems.push({
-          entityId: id,
-          data: {
-            ...(raw as RawMessageEntity),
-            id,
-            subject,
-            from,
-            to,
-            createdAt: new Date(),
-          },
-        });
-      } catch (err) {
-        console.log(`[mail] enrich parse error for ${id}: ${describeError(err)}`);
-      }
+  results.forEach((r) => {
+    if (r.status === "fulfilled") {
+      succeeded++;
+    } else {
+      failed++;
+      console.warn(`[mail] enrichStubs: failed for item: ${describeError(r.reason)}`);
     }
+  });
 
-    if (upsertItems.length > 0) {
-      try {
-        await upsertManyByEntityIds(accountId, upsertItems);
-      } catch (err) {
-        console.log(`[mail] bulk upsert failed (${upsertItems.length} items): ${describeError(err)}`);
-      }
+  const upsertItems: UpsertItem[] = [];
+  for (const r of results) {
+    if (r.status !== "fulfilled") continue;
+    const { id, raw } = r.value;
+    try {
+      const payload = raw.payload as
+        | { headers?: Array<{ name?: string; value?: string }> }
+        | undefined;
+      const headers = payload?.headers ?? [];
+      const get = (name: string) =>
+        headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value;
+      const subject = get("Subject");
+      const from = get("From");
+      const to = get("To");
+
+      upsertItems.push({
+        entityId: id,
+        data: {
+          ...(raw as RawMessageEntity),
+          id,
+          subject,
+          from,
+          to,
+          createdAt: new Date(),
+        },
+      });
+    } catch (err) {
+      console.log(`[mail] enrich parse error for ${id}: ${describeError(err)}`);
+    }
+  }
+
+  if (upsertItems.length > 0) {
+    try {
+      await upsertManyByEntityIds(accountId, upsertItems);
+    } catch (err) {
+      console.log(`[mail] bulk upsert failed (${upsertItems.length} items): ${describeError(err)}`);
     }
   }
 

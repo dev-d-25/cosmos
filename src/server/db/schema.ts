@@ -7,6 +7,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
 } from "drizzle-orm/pg-core";
 export const user = pgTable("user", {
   id: text("id").primaryKey(),
@@ -129,7 +130,7 @@ export const corsairEntities = pgTable(
     data: jsonb("data").notNull().default({}),
   },
   (t) => [
-    index("idx_corsair_entities_tenant_type_entity").on(
+    uniqueIndex("idx_corsair_entities_tenant_type_entity").on(
       t.accountId,
       t.entityType,
       t.entityId,
