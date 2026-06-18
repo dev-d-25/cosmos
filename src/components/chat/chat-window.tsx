@@ -4,6 +4,7 @@ import { useRef, useEffect, useCallback } from "react";
 import { ChatMessage } from "./chat-message";
 import { ChatComposer } from "./chat-composer";
 import { ChatEmptyState } from "./chat-empty-state";
+import { QUICK_ACTIONS } from "./quick-actions";
 import type { UIMessage } from "@ai-sdk/react";
 
 interface ChatWindowProps {
@@ -14,6 +15,7 @@ interface ChatWindowProps {
   onSend?: (text: string) => void;
   status: string;
   stop: () => void;
+  disabled?: boolean;
 }
 
 export function ChatWindow({
@@ -24,6 +26,7 @@ export function ChatWindow({
   onSend,
   status,
   stop,
+  disabled,
 }: ChatWindowProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const endRef = useRef<HTMLDivElement>(null);
@@ -79,6 +82,10 @@ export function ChatWindow({
                 role={message.role as "user" | "assistant" | "system"}
                 parts={message.parts}
                 isStreaming={isStreaming}
+                incomplete={Boolean(
+                  (message as { metadata?: { incomplete?: boolean } })
+                    .metadata?.incomplete,
+                )}
               />
             ))}
 
@@ -87,12 +94,19 @@ export function ChatWindow({
               messages.length > 0 &&
               messages[messages.length - 1]?.role === "user" && (
                 <div className="group/message w-full" data-role="assistant">
-                  <div className="flex items-start gap-3">
-                    <div className="bg-muted/60 text-muted-foreground ring-border/50 flex size-7 shrink-0 items-center justify-center rounded-lg ring-1">
-                      <span className="text-xs font-medium">✦</span>
+                  <div className="flex flex-col gap-1">
+                    <div className="flex items-center gap-2">
+                      <span className="text-primary text-[13px] font-medium">Agent</span>
                     </div>
-                    <div className="text-muted-foreground text-[13px] leading-[1.65]">
-                      Thinking...
+                    <div className="flex items-start gap-3">
+                      <div className="pt-0.5">
+                        <div className="bg-muted/60 text-muted-foreground ring-border/50 flex size-7 shrink-0 items-center justify-center rounded-none ring-1">
+                          <span className="text-xs font-medium">✦</span>
+                        </div>
+                      </div>
+                      <span className="text-muted-foreground text-[13px]">
+                        <span className="animate-[pulse_1s_ease-in-out_infinite]">▊</span>
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -105,7 +119,7 @@ export function ChatWindow({
         {/* Scroll to bottom button */}
         <button
           aria-label="Scroll to bottom"
-          className="absolute bottom-4 left-1/2 z-10 flex h-7 -translate-x-1/2 items-center rounded-full border border-border/50 bg-card/90 px-3.5 text-[10px] shadow-md backdrop-blur-lg transition-all duration-200 hover:bg-card"
+          className="absolute bottom-4 left-1/2 z-10 flex h-7 -translate-x-1/2 items-center rounded-none border border-border/50 bg-card/90 px-3.5 text-[10px] shadow-md backdrop-blur-lg transition-all duration-200 hover:bg-card"
           onClick={() => scrollToBottom("smooth")}
           type="button"
         >
@@ -126,15 +140,33 @@ export function ChatWindow({
         </button>
       </div>
 
-      {/* Composer - sibling of messages area, not inside it */}
-      <div className="shrink-0 mx-auto w-full max-w-3xl bg-background px-2 pb-2 md:px-4 md:pb-3">
-        <ChatComposer
-          input={input}
-          setInput={setInput}
-          onSubmit={onSubmit}
-          status={status}
-          stop={stop}
-        />
+{/* Composer - sibling of messages area, not inside it */}
+       <div className="shrink-0 mx-auto w-full max-w-3xl bg-background px-2 pt-2 pb-2 md:px-4 md:pt-3 md:pb-3">
+         <ChatComposer
+           input={input}
+           setInput={setInput}
+           onSubmit={onSubmit}
+           status={status}
+           stop={stop}
+           disabled={disabled}
+         />
+        {/* Quick action buttons */}
+        {!isStreaming && messages.length === 0 && (
+          <div className="flex flex-wrap gap-2 px-1 pt-2">
+            {QUICK_ACTIONS.map((action) => (
+              <button
+                key={action.label}
+                onClick={() => {
+                  setInput(action.prompt);
+                }}
+                className="border-border/50 bg-card/30 hover:bg-card/60 hover:text-foreground rounded-none border px-3.5 py-1.5 text-[12px] leading-relaxed text-muted-foreground transition-all duration-200"
+              >
+                <span className="mr-1.5 inline-block text-[13px]">{action.icon}</span>
+                {action.label}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

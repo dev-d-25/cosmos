@@ -1,10 +1,10 @@
 import {
   convertToModelMessages,
+  createIdGenerator,
   stepCountIs,
   streamText,
+  type LanguageModelUsage,
   type UIMessage,
-  type ToolCallPart,
-  type TextPart,
 } from "ai";
 import { z } from "zod";
 
@@ -12,15 +12,26 @@ import { kilo, DEFAULT_MODEL } from "@/lib/ai/kilo";
 import { getCorsairToolsForTenant } from "@/lib/ai/corsair-tools";
 import { SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { getSessionTenantId } from "@/server/auth";
-import { persistAssistantMessage } from "@/server/chat";
+import {
+  getMessagesForThread,
+  upsertAssistantMessage,
+} from "@/server/chat";
 import { db } from "@/server/db";
 import { chatThread } from "@/server/db/schema";
 import { and, eq } from "drizzle-orm";
+import { convertDbMessagesToUIMessages } from "@/lib/chat/message-converter";
 
 const bodySchema = z.object({
   threadId: z.string().min(1),
+  message: z.unknown() as z.ZodType<UIMessage>,
   model: z.string().min(1).optional(),
 });
+
+type UsageSnapshot = {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  model: string | null;
+};
 
 export async function POST(request: Request) {
   const userId = await getSessionTenantId();
@@ -29,19 +40,16 @@ export async function POST(request: Request) {
     return new Response("Unauthorized", { status: 401 });
   }
 
-  let raw: { threadId?: unknown; model?: unknown; messages?: unknown };
+  let raw: {
+    threadId?: unknown;
+    message?: unknown;
+    model?: unknown;
+  };
   try {
     raw = (await request.json()) as typeof raw;
   } catch {
     return new Response("Invalid JSON body", { status: 400 });
   }
-
-  console.log("[chat/api] Received:", {
-    threadId: raw.threadId,
-    model: raw.model,
-    messagesCount: Array.isArray(raw.messages) ? raw.messages.length : 0,
-    userId,
-  });
 
   const parsed = bodySchema.safeParse(raw);
   if (!parsed.success) {
@@ -52,28 +60,8 @@ export async function POST(request: Request) {
     );
   }
 
-  const { threadId } = parsed.data;
+  const { threadId, message } = parsed.data;
   const modelId = parsed.data.model ?? DEFAULT_MODEL;
-
-  const uiMessages = Array.isArray(raw.messages)
-    ? (raw.messages as UIMessage[])
-    : [];
-  if (uiMessages.length === 0) {
-    console.log("[chat/api] messages is empty or not an array:", raw.messages);
-    return new Response("messages must be a non-empty array", { status: 400 });
-  }
-
-  // Log last user message for debugging
-  const lastMsg = uiMessages[uiMessages.length - 1];
-  if (lastMsg) {
-    const textParts = (lastMsg.parts ?? []).filter(
-      (p): p is TextPart => p.type === "text",
-    );
-    console.log(
-      "[chat/api] Last user message:",
-      textParts.map((p) => p.text).join("").slice(0, 200),
-    );
-  }
 
   const [thread] = await db
     .select()
@@ -94,21 +82,73 @@ export async function POST(request: Request) {
     );
   }
 
-  console.log("[chat/api] Thread found, starting stream with model:", modelId);
+  const dbMessages = await getMessagesForThread(userId, threadId);
+  if (!dbMessages) {
+    return new Response("Thread not found", { status: 404 });
+  }
+
+  const dbUIMessages = convertDbMessagesToUIMessages(dbMessages);
+
+  // De-dup: the client persists the user message via /api/chat/messages BEFORE
+  // calling sendMessage, so it's already in dbUIMessages. Append only if the
+  // request body's message id isn't already the tail.
+  const lastDbMsg = dbUIMessages[dbUIMessages.length - 1];
+  const allMessages: UIMessage[] =
+    lastDbMsg && lastDbMsg.id === message.id
+      ? dbUIMessages
+      : [...dbUIMessages, message];
 
   const { client, tools } = await getCorsairToolsForTenant(userId);
-  console.log(
-    "[chat/api] MCP tools available:",
-    Object.keys(tools),
-  );
+  console.log("[chat/api] MCP tools available:", Object.keys(tools));
 
-  let responseModel: string | null = modelId;
-  let responseMessages: unknown[] = [];
-  let inputTokens: number | null = null;
-  let outputTokens: number | null = null;
-  const assistantMessageId = crypto.randomUUID();
+  const usage: UsageSnapshot = {
+    inputTokens: null,
+    outputTokens: null,
+    model: modelId,
+  };
+  let hadError = false;
 
-  const modelMessages = await convertToModelMessages(uiMessages);
+  const modelMessages = await convertToModelMessages(allMessages);
+
+  const persistAssistant = async (
+    responseMessage: UIMessage,
+    isAborted: boolean,
+    finishReason: string | null,
+    usageOverride?: { inputTokens: number | null; outputTokens: number | null },
+  ) => {
+    try {
+      await upsertAssistantMessage(
+        userId,
+        threadId,
+        {
+          id: responseMessage.id,
+          parts: responseMessage.parts ?? [],
+          model: usage.model,
+          inputTokens: usageOverride?.inputTokens ?? usage.inputTokens,
+          outputTokens: usageOverride?.outputTokens ?? usage.outputTokens,
+          incomplete: isAborted,
+          finishReason,
+        },
+        { hadError },
+      );
+      console.log(
+        "[chat/api] Assistant message persisted:",
+        responseMessage.id,
+        isAborted ? "(aborted)" : hadError ? "(error)" : "(complete)",
+      );
+    } catch (err) {
+      console.error("[chat/api] failed to persist assistant message", err);
+    }
+  };
+
+  const closeMcp = async () => {
+    try {
+      await client.close();
+      console.log("[chat/api] MCP client closed successfully");
+    } catch (err) {
+      console.error("[chat/api] Failed to close MCP client:", err);
+    }
+  };
 
   const result = streamText({
     model: kilo.chat(modelId),
@@ -150,73 +190,76 @@ export async function POST(request: Request) {
         console.log("\n[chat/api] Text step:", text.slice(0, 200));
       }
     },
-    onFinish: async ({ response, usage }) => {
+    onFinish: async ({ response, usage: stepUsage }) => {
+      // Provider finished normally. Capture usage + actual model id; persist
+      // with final data. The toUIMessageStreamResponse.onFinish below may
+      // also call persistAssistant — onConflictDoUpdate makes the second
+      // write idempotent.
+      const u: LanguageModelUsage | undefined = stepUsage;
+      usage.inputTokens = u?.inputTokens ?? null;
+      usage.outputTokens = u?.outputTokens ?? null;
+      usage.model = response.modelId ?? modelId;
       console.log("[chat/api] Stream finished. Usage:", usage);
-      responseModel = response.modelId ?? modelId;
-      const messages = await response.messages;
-      responseMessages = (messages ?? []).map((m) =>
-        JSON.parse(JSON.stringify(m)),
-      ) as unknown[];
-
-      // Log all tool calls from the final response
-      for (const msg of responseMessages) {
-        const m = msg as { role?: string; content?: unknown[] };
-        if (m.role === "assistant" && Array.isArray(m.content)) {
-          for (const part of m.content) {
-            const p = part as { type?: string; toolName?: string; toolCallId?: string; args?: unknown; result?: unknown };
-            if (p.type === "tool-call") {
-              console.log("[chat/api] Final tool call in response:", {
-                toolName: p.toolName,
-                toolCallId: p.toolCallId,
-                args: JSON.stringify(p.args).slice(0, 300),
-              });
-            }
-            if (p.type === "tool-result") {
-              console.log("[chat/api] Final tool result in response:", {
-                toolCallId: p.toolCallId,
-                result: JSON.stringify(p.result).slice(0, 300),
-              });
-            }
-          }
-        }
-      }
-
-      inputTokens = usage.inputTokens ?? null;
-      outputTokens = usage.outputTokens ?? null;
-      try {
-        await persistAssistantMessage(userId, threadId, {
-          id: assistantMessageId,
-          parts: responseMessages,
-          model: responseModel,
-          inputTokens,
-          outputTokens,
-        });
-        console.log("[chat/api] Assistant message persisted");
-      } catch (err) {
-        console.error("[chat] failed to persist assistant message", err);
-      }
-
-      // Close MCP client AFTER stream is fully consumed
-      try {
-        await client.close();
-        console.log("[chat/api] MCP client closed successfully");
-      } catch (err) {
-        console.error("[chat/api] Failed to close MCP client:", err);
-      }
     },
     onError: ({ error }) => {
       console.error("[chat/api] Stream error:", error);
-      // Also close client on error
+      hadError = true;
       client.close().catch(() => {});
     },
   });
 
-  const streamResponse = result.toUIMessageStreamResponse({
+  result.consumeStream();
+
+  return result.toUIMessageStreamResponse({
+    originalMessages: allMessages,
+    generateMessageId: createIdGenerator({ prefix: "msg", size: 16 }),
     onError: (err) => (err instanceof Error ? err.message : "Unknown error"),
-    generateMessageId: () => assistantMessageId,
+    // Capture per-step usage into the assistant message's metadata so it is
+    // available at onFinish time even on the cancel path (where the
+    // stitchable stream's flush may not have fired yet by the time the UI
+    // TransformStream cancels). The `finish` chunk itself also runs through
+    // this callback and carries the final step's usage.
+    messageMetadata: ({ part }) => {
+      if (part.type === "finish-step") {
+        const u = part.usage;
+        if (u) {
+          return {
+            usage: {
+              inputTokens: u.inputTokens ?? null,
+              outputTokens: u.outputTokens ?? null,
+            },
+          };
+        }
+      }
+      if (part.type === "finish") {
+        const u = part.totalUsage;
+        if (u) {
+          return {
+            usage: {
+              inputTokens: u.inputTokens ?? null,
+              outputTokens: u.outputTokens ?? null,
+            },
+          };
+        }
+      }
+      return null;
+    },
+    onFinish: async ({ responseMessage, isAborted, finishReason }) => {
+      const meta = responseMessage.metadata as
+        | {
+            usage?: { inputTokens: number | null; outputTokens: number | null };
+          }
+        | undefined;
+      const inputTokens = meta?.usage?.inputTokens ?? usage.inputTokens;
+      const outputTokens = meta?.usage?.outputTokens ?? usage.outputTokens;
+
+      await persistAssistant(
+        responseMessage,
+        isAborted,
+        finishReason ?? null,
+        { inputTokens, outputTokens },
+      );
+      await closeMcp();
+    },
   });
-
-  streamResponse.headers.set("x-cosmos-assistant-id", assistantMessageId);
-
-  return streamResponse;
 }

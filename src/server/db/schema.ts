@@ -195,6 +195,8 @@ export const chatMessage = pgTable(
     model: text("model"),
     inputTokens: integer("input_tokens"),
     outputTokens: integer("output_tokens"),
+    incomplete: boolean("incomplete").notNull().default(false),
+    finishReason: text("finish_reason"),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
       .defaultNow(),

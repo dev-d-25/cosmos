@@ -7,6 +7,8 @@ import { ChatToolPart } from "./chat-tool-part";
 import { ChatMessageActions } from "./chat-message-actions";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { Shimmer } from "./shimmer";
+import { format } from "date-fns";
+import { AlertTriangleIcon } from "lucide-react";
 
 interface MessagePart {
   type: string;
@@ -22,9 +24,11 @@ interface ChatMessageProps {
   role: "user" | "assistant" | "system";
   parts: MessagePart[];
   isStreaming?: boolean;
+  createdAt?: Date;
+  incomplete?: boolean;
 }
 
-export function ChatMessage({ role, parts, isStreaming }: ChatMessageProps) {
+export function ChatMessage({ role, parts, isStreaming, createdAt, incomplete }: ChatMessageProps) {
   const isUser = role === "user";
   const isAssistant = role === "assistant";
 
@@ -52,25 +56,52 @@ export function ChatMessage({ role, parts, isStreaming }: ChatMessageProps) {
       data-role={role}
     >
       {isAssistant ? (
-        <div className="flex items-start gap-3">
-          <div className="bg-muted/60 text-muted-foreground ring-border/50 flex size-7 shrink-0 items-center justify-center rounded-lg ring-1">
-            <span className="text-xs font-medium">✦</span>
-          </div>
-          <div className="flex min-w-0 flex-1 flex-col gap-2">
-            {reasoning.text && (
-              <MessageReasoning
-                isLoading={!!isStreaming && reasoning.isStreaming}
-                reasoning={reasoning.text}
-              />
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <span className="text-primary text-[13px] font-medium">Agent</span>
+            {createdAt && (
+              <span className="text-muted-foreground text-[11px]">{format(createdAt, "h:mm a")}</span>
             )}
-            {parts.map((part, i) => renderPart(part, i, isStreaming, false))}
-            <ChatMessageActions parts={parts} className="-ml-0.5" />
+            {incomplete && (
+              <span
+                className="text-muted-foreground inline-flex items-center gap-1 text-[11px]"
+                title="The assistant was interrupted before finishing this reply."
+              >
+                <AlertTriangleIcon className="size-3" />
+                <span>Generation stopped</span>
+              </span>
+            )}
+          </div>
+          <div className="flex items-start gap-3">
+            <div className="pt-0.5">
+              <div className="bg-muted/60 text-muted-foreground ring-border/50 flex size-7 shrink-0 items-center justify-center rounded-none ring-1">
+                <span className="text-xs font-medium">✦</span>
+              </div>
+            </div>
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
+              {reasoning.text && (
+                <MessageReasoning
+                  isLoading={!!isStreaming && reasoning.isStreaming}
+                  reasoning={reasoning.text}
+                />
+              )}
+              {parts.map((part, i) => renderPart(part, i, isStreaming, false))}
+              <ChatMessageActions parts={parts} className="-ml-0.5" />
+            </div>
           </div>
         </div>
       ) : (
-        <div className="flex flex-col items-end gap-2">
-          {parts.map((part, i) => renderPart(part, i, isStreaming, true))}
-          <ChatMessageActions parts={parts} className="-mr-0.5" />
+        <div className="flex flex-col items-end gap-1">
+          <div className="flex items-center gap-2">
+            <span className="text-primary text-[13px] font-medium">You</span>
+            {createdAt && (
+              <span className="text-muted-foreground text-[11px]">{format(createdAt, "h:mm a")}</span>
+            )}
+          </div>
+          <div className="flex flex-col items-end gap-2">
+            {parts.map((part, i) => renderPart(part, i, isStreaming, true))}
+            <ChatMessageActions parts={parts} className="-mr-0.5" />
+          </div>
         </div>
       )}
     </div>
@@ -132,7 +163,7 @@ function MessageReasoning({
       <CollapsibleContent>
         <div className="mt-2 text-muted-foreground/60 [overflow-anchor:none]">
           <div
-            className="max-h-[200px] overflow-y-auto rounded-lg border border-border/20 bg-muted/30 px-3 py-2 text-[11px] leading-relaxed"
+            className="max-h-[200px] overflow-y-auto rounded-none border border-border/20 bg-muted/30 px-3 py-2 text-[11px] leading-relaxed"
             style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
           >
             <ChatMarkdown text={reasoning} />
@@ -154,7 +185,7 @@ function renderPart(
       return (
         <div
           key={i}
-          className="w-fit max-w-[min(80%,56ch)] break-words rounded-2xl rounded-br-lg border border-border/30 bg-gradient-to-br from-secondary to-muted px-3.5 py-2 text-[13px] leading-[1.65] shadow-sm"
+          className="w-fit max-w-[min(80%,56ch)] break-words rounded-none border border-border/40 bg-secondary px-4 py-2.5 text-[13px] leading-[1.65] shadow-sm"
         >
           {part.text}
         </div>

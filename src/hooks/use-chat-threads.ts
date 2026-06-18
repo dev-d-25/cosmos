@@ -93,7 +93,6 @@ export function useChatThread(id: string | null) {
     queryKey: chatKeys.thread(id ?? ""),
     queryFn: () => fetchThread(id!),
     enabled: !!id,
-    placeholderData: (prev) => prev,
   });
 }
 
