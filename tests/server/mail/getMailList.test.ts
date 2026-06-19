@@ -7,17 +7,32 @@ type Row = {
   entity_type?: string;
 };
 
-const mockList =
-  vi.fn<(opts?: { limit?: number; offset?: number }) => Promise<Row[]>>();
-const mockCount = vi.fn<() => Promise<number>>();
+const mockListMessages = vi.fn<
+  (
+    accountId: string,
+    opts?: { limit?: number; offset?: number; orderBy?: "created_at" | "internal_date" },
+  ) => Promise<Row[]>
+>();
+const mockListByLabel = vi.fn<
+  (
+    accountId: string,
+    labelIds: string[],
+    opts?: { limit?: number; offset?: number; orderBy?: "created_at" | "internal_date" },
+  ) => Promise<Row[]>
+>();
+const mockCountByLabel = vi.fn<() => Promise<number>>();
+/**
+ * The unfiltered INBOX paths also call the SDK's
+ * `client.gmail.db.messages.count()` for a total row count when
+ * `resultSizeEstimate` is unavailable. Mock it explicitly.
+ */
+const mockDbCount = vi.fn<() => Promise<number>>();
 const mockFindByEntityId = vi.fn<(id: string) => Promise<Row | null>>();
 const mockFindManyByEntityIds = vi.fn<(ids: string[]) => Promise<Row[]>>();
 const mockApiMessagesList = vi.fn();
 const mockGetAccessToken = vi.fn<() => Promise<string | null>>();
 
 const mockUpsertManyByEntityIds = vi.fn();
-const mockListByLabel = vi.fn();
-const mockCountByLabel = vi.fn();
 const mockGetAccountIdForTenant = vi.fn();
 
 const mockFetch = vi.fn();
@@ -27,8 +42,7 @@ const mockWithTenant = vi.fn(() => ({
   gmail: {
     db: {
       messages: {
-        list: mockList,
-        count: mockCount,
+        count: mockDbCount,
         findByEntityId: mockFindByEntityId,
         findManyByEntityIds: mockFindManyByEntityIds,
       },
@@ -58,10 +72,16 @@ vi.mock("@/server/auth", () => ({
   getSessionTenantId: mockGetSessionTenantId,
 }));
 
+/**
+ * The mail pipeline reads from the local DB via our own helpers
+ * (listMessages, listByLabel, countByLabel), NOT the SDK's
+ * `client.gmail.db.messages.list/count`. Mock the helpers, not the SDK.
+ */
 vi.mock("@/server/db/mail-entities", () => ({
-  upsertManyByEntityIds: mockUpsertManyByEntityIds,
+  listMessages: mockListMessages,
   listByLabel: mockListByLabel,
   countByLabel: mockCountByLabel,
+  upsertManyByEntityIds: mockUpsertManyByEntityIds,
   getAccountIdForTenant: mockGetAccountIdForTenant,
 }));
 
@@ -118,15 +138,15 @@ function mockGmailFetchFor(rows: Row[]): void {
 describe("getMailList pagination", () => {
   beforeEach(() => {
     vi.resetModules();
-    mockList.mockReset();
-    mockCount.mockReset();
+    mockListMessages.mockReset();
+    mockListByLabel.mockReset();
+    mockCountByLabel.mockReset();
+    mockDbCount.mockReset();
     mockFindByEntityId.mockReset();
     mockFindManyByEntityIds.mockReset();
     mockApiMessagesList.mockReset();
     mockGetAccessToken.mockReset();
     mockUpsertManyByEntityIds.mockReset();
-    mockListByLabel.mockReset();
-    mockCountByLabel.mockReset();
     mockGetAccountIdForTenant.mockReset();
     mockFetch.mockReset();
     mockLabelsList.mockReset();
@@ -144,9 +164,11 @@ describe("getMailList pagination", () => {
     // Default fetch impl: success
     vi.stubGlobal("fetch", mockFetch);
 
-    // Default new helpers return empty
+    // Default helpers return empty / 0
     mockListByLabel.mockResolvedValue([]);
     mockCountByLabel.mockResolvedValue(0);
+    mockListMessages.mockResolvedValue([]);
+    mockDbCount.mockResolvedValue(0);
     mockLabelsList.mockResolvedValue([]);
   });
 
@@ -167,10 +189,10 @@ describe("getMailList pagination", () => {
   it("serves page 0 entirely from cache when cache covers the request", async () => {
     const rows = makeRows(50);
     // Cache check: read first 50 rows
-    mockList.mockResolvedValueOnce(rows);
+    mockListMessages.mockResolvedValueOnce(rows);
     // buildPageFromDB unfiltered path: read fetchLimit (50)
-    mockList.mockResolvedValueOnce(rows);
-    mockCount.mockResolvedValueOnce(50);
+    mockListMessages.mockResolvedValueOnce(rows);
+    mockCountByLabel.mockResolvedValueOnce(50);
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({ pageIndex: 0, pageSize: 50 });
@@ -186,8 +208,8 @@ describe("getMailList pagination", () => {
   it("returns a slice for page 1 from cache when more rows are cached than needed", async () => {
     const rows = makeRows(120);
     // getMailListFromCachePage unfiltered: read limit (100)
-    mockList.mockResolvedValueOnce(rows);
-    mockCount.mockResolvedValueOnce(120);
+    mockListMessages.mockResolvedValueOnce(rows);
+    mockCountByLabel.mockResolvedValueOnce(120);
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({
@@ -204,8 +226,8 @@ describe("getMailList pagination", () => {
 
   it("serves last partial page from cache when total is not a multiple of pageSize", async () => {
     const rows = makeRows(120);
-    mockList.mockResolvedValueOnce(rows);
-    mockCount.mockResolvedValueOnce(120);
+    mockListMessages.mockResolvedValueOnce(rows);
+    mockCountByLabel.mockResolvedValueOnce(120);
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({
@@ -221,9 +243,9 @@ describe("getMailList pagination", () => {
 
   it("returns items sorted by receivedAt descending", async () => {
     const rows = makeRows(50);
-    mockList.mockResolvedValueOnce(rows);
-    mockList.mockResolvedValueOnce(rows);
-    mockCount.mockResolvedValueOnce(50);
+    mockListMessages.mockResolvedValueOnce(rows);
+    mockListMessages.mockResolvedValueOnce(rows);
+    mockCountByLabel.mockResolvedValueOnce(50);
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({ pageIndex: 0, pageSize: 50 });
@@ -239,10 +261,10 @@ describe("getMailList pagination", () => {
 
   it("syncs from Gmail when cache is empty (slow path)", async () => {
     // Cache check: empty
-    mockList.mockResolvedValueOnce([]);
+    mockListMessages.mockResolvedValueOnce([]);
     // buildPageFromDB after sync: 50 enriched rows
-    mockList.mockResolvedValueOnce(makeRows(50));
-    mockCount.mockResolvedValueOnce(50);
+    mockListMessages.mockResolvedValueOnce(makeRows(50));
+    mockCountByLabel.mockResolvedValueOnce(50);
 
     // Gmail API returns 50 message IDs
     const apiRows = makeRows(50).map((r) => ({
@@ -274,8 +296,8 @@ describe("getMailList pagination", () => {
   it("fetches page 1 with a Gmail pageToken and warms metadata", async () => {
     const cached = makeRows(50);
     // buildPageFromDB unfiltered: read fetchLimit
-    mockList.mockResolvedValueOnce(cached);
-    mockCount.mockResolvedValueOnce(100);
+    mockListMessages.mockResolvedValueOnce(cached);
+    mockCountByLabel.mockResolvedValueOnce(100);
 
     const newApiRows = makeRows(50).map((r, i) => ({
       id: `p2_${i.toString().padStart(3, "0")}`,
@@ -306,8 +328,8 @@ describe("getMailList pagination", () => {
   });
 
   it("returns empty page for pageIndex >= 1 with no pageToken and short cache", async () => {
-    mockList.mockResolvedValueOnce([]);
-    mockCount.mockResolvedValueOnce(0);
+    mockListMessages.mockResolvedValueOnce([]);
+    mockCountByLabel.mockResolvedValueOnce(0);
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({ pageIndex: 1, pageSize: 50 });
@@ -319,8 +341,8 @@ describe("getMailList pagination", () => {
   });
 
   it("skips cache when force is true and warms page 0 from live", async () => {
-    mockList.mockResolvedValueOnce(makeRows(50));
-    mockCount.mockResolvedValueOnce(50);
+    mockListMessages.mockResolvedValueOnce(makeRows(50));
+    mockCountByLabel.mockResolvedValueOnce(50);
 
     const apiRows = makeRows(50).map((r, i) => ({
       id: r.data.id,
@@ -346,9 +368,9 @@ describe("getMailList pagination", () => {
   it("clamps pageSize to the 1..100 range", async () => {
     // pageSize=5000 → clamped to 100
     const bigRows = makeRows(100);
-    mockList.mockResolvedValueOnce(bigRows);
-    mockList.mockResolvedValueOnce(bigRows);
-    mockCount.mockResolvedValue(100);
+    mockListMessages.mockResolvedValueOnce(bigRows);
+    mockListMessages.mockResolvedValueOnce(bigRows);
+    mockCountByLabel.mockResolvedValue(100);
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({
@@ -359,9 +381,9 @@ describe("getMailList pagination", () => {
 
     // pageSize=0 → clamped to 1
     const tinyRows = makeRows(1);
-    mockList.mockResolvedValueOnce(tinyRows);
-    mockList.mockResolvedValueOnce(tinyRows);
-    mockCount.mockResolvedValueOnce(1);
+    mockListMessages.mockResolvedValueOnce(tinyRows);
+    mockListMessages.mockResolvedValueOnce(tinyRows);
+    mockCountByLabel.mockResolvedValueOnce(1);
 
     const result2 = await getMailList({
       pageIndex: 0,
@@ -371,9 +393,9 @@ describe("getMailList pagination", () => {
   });
 
   it("clamps negative pageIndex to 0", async () => {
-    mockList.mockResolvedValueOnce(makeRows(50));
-    mockList.mockResolvedValueOnce(makeRows(50));
-    mockCount.mockResolvedValueOnce(50);
+    mockListMessages.mockResolvedValueOnce(makeRows(50));
+    mockListMessages.mockResolvedValueOnce(makeRows(50));
+    mockCountByLabel.mockResolvedValueOnce(50);
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({ pageIndex: -3, pageSize: 50 });
@@ -384,9 +406,9 @@ describe("getMailList pagination", () => {
   it("filters out rows whose data does not satisfy MailListItemSchema", async () => {
     const validRows = makeRows(50);
     const invalidRow: Row = { data: {} };
-    mockList.mockResolvedValueOnce([...validRows, invalidRow]);
-    mockList.mockResolvedValueOnce([...validRows, invalidRow]);
-    mockCount.mockResolvedValueOnce(51);
+    mockListMessages.mockResolvedValueOnce([...validRows, invalidRow]);
+    mockListMessages.mockResolvedValueOnce([...validRows, invalidRow]);
+    mockCountByLabel.mockResolvedValueOnce(51);
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({ pageIndex: 0, pageSize: 50 });
@@ -398,9 +420,13 @@ describe("getMailList pagination", () => {
 
   it("exposes a cache-page token when more rows exist locally beyond the page", async () => {
     const rows = makeRows(50);
-    mockList.mockResolvedValueOnce(rows);
-    mockList.mockResolvedValueOnce(rows);
-    mockCount.mockResolvedValueOnce(120);
+    mockListMessages.mockResolvedValueOnce(rows);
+    mockListMessages.mockResolvedValueOnce(rows);
+    // Unfiltered INBOX path uses client.gmail.db.messages.count() directly,
+    // not our countByLabel helper. The label list returns no match so the
+    // code falls back to the SDK count.
+    mockLabelsList.mockResolvedValueOnce([]);
+    mockDbCount.mockResolvedValueOnce(120);
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({ pageIndex: 0, pageSize: 50 });
@@ -409,10 +435,30 @@ describe("getMailList pagination", () => {
     expect(result.nextPageToken).toBe("cache:1");
   });
 
+  it("uses label.messagesTotal from cached labels before falling back to SDK count", async () => {
+    const rows = makeRows(50);
+    mockListMessages.mockResolvedValueOnce(rows);
+    mockListMessages.mockResolvedValueOnce(rows);
+    // When the label list returns a label with messagesTotal, the code
+    // uses that value directly without calling the SDK count.
+    mockLabelsList.mockResolvedValueOnce([
+      { data: { id: "INBOX", messagesTotal: 240 } },
+    ]);
+
+    const { getMailList } = await import("@/server/mail");
+    const result = await getMailList({ pageIndex: 0, pageSize: 50 });
+
+    expect(result.source).toBe("cache");
+    expect(result.nextPageToken).toBe("cache:1");
+    // The label.messagesTotal path was used; the SDK count should NOT
+    // have been called.
+    expect(mockDbCount).not.toHaveBeenCalled();
+  });
+
   it("returns null nextPageToken when the cache holds exactly enough rows", async () => {
-    mockList.mockResolvedValueOnce(makeRows(50));
-    mockList.mockResolvedValueOnce(makeRows(50));
-    mockCount.mockResolvedValueOnce(50);
+    mockListMessages.mockResolvedValueOnce(makeRows(50));
+    mockListMessages.mockResolvedValueOnce(makeRows(50));
+    mockCountByLabel.mockResolvedValueOnce(50);
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({ pageIndex: 0, pageSize: 50 });
@@ -424,8 +470,8 @@ describe("getMailList pagination", () => {
   it("serves cache:N tokens from the local cache with no API call", async () => {
     const rows = makeRows(120);
     // getMailListFromCachePage unfiltered: read limit (100 for page=1)
-    mockList.mockResolvedValueOnce(rows);
-    mockCount.mockResolvedValueOnce(120);
+    mockListMessages.mockResolvedValueOnce(rows);
+    mockCountByLabel.mockResolvedValueOnce(120);
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({
@@ -442,8 +488,8 @@ describe("getMailList pagination", () => {
   });
 
   it("returns an empty page for a cache:N token beyond the local count", async () => {
-    mockList.mockResolvedValueOnce([]);
-    mockCount.mockResolvedValueOnce(50);
+    mockListMessages.mockResolvedValueOnce([]);
+    mockCountByLabel.mockResolvedValueOnce(50);
 
     const { getMailList } = await import("@/server/mail");
     const result = await getMailList({ pageToken: "cache:5", pageSize: 50 });
@@ -455,9 +501,9 @@ describe("getMailList pagination", () => {
   });
 
   it("propagates the Gmail pageToken from the warm-up call when present", async () => {
-    mockList.mockResolvedValueOnce([]);
-    mockList.mockResolvedValueOnce(makeRows(50));
-    mockCount.mockResolvedValueOnce(50);
+    mockListMessages.mockResolvedValueOnce([]);
+    mockListMessages.mockResolvedValueOnce(makeRows(50));
+    mockCountByLabel.mockResolvedValueOnce(50);
 
     const apiRows = makeRows(50).map((r) => ({
       id: r.data.id,
@@ -477,9 +523,9 @@ describe("getMailList pagination", () => {
   });
 
   it("falls back to a cache-page token after warm-up when Gmail returned no token but more rows are cached", async () => {
-    mockList.mockResolvedValueOnce([]);
-    mockList.mockResolvedValueOnce(makeRows(60));
-    mockCount.mockResolvedValueOnce(60);
+    mockListMessages.mockResolvedValueOnce([]);
+    mockListMessages.mockResolvedValueOnce(makeRows(60));
+    mockCountByLabel.mockResolvedValueOnce(60);
 
     const apiRows = makeRows(50).map((r) => ({
       id: r.data.id,

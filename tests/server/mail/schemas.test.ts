@@ -10,9 +10,15 @@ import {
   MailMessageQuerySchema,
   MailProfileSchema,
   MailThreadsQuerySchema,
-} from "@/lib/schemas/mail";
+} from "@/server/mail/schemas";
 
-describe("Mail schemas", () => {
+/**
+ * These tests cover the LIVE schema file consumed by the route handlers
+ * (src/server/mail/schemas.ts). The old duplicate at
+ * src/lib/schemas/mail.ts was dead code (no callers) and has been
+ * removed; do not resurrect it.
+ */
+describe("Mail schemas (live)", () => {
   describe("MailAttachmentSchema", () => {
     it("accepts a valid attachment", () => {
       const input = {
@@ -56,6 +62,19 @@ describe("Mail schemas", () => {
       expect(result.threadId).toBe("thread_1");
     });
 
+    it("accepts optional subject/from/snippet (defaults to undefined)", () => {
+      const result = MailListItemSchema.parse({
+        id: "1",
+        threadId: "t1",
+        receivedAt: new Date().toISOString(),
+        unread: false,
+        labelIds: [],
+      });
+      expect(result.subject).toBeUndefined();
+      expect(result.from).toBeUndefined();
+      expect(result.snippet).toBeUndefined();
+    });
+
     it("rejects missing unread", () => {
       const result = MailListItemSchema.safeParse({
         id: "1",
@@ -64,20 +83,6 @@ describe("Mail schemas", () => {
         from: "",
         snippet: "",
         receivedAt: new Date().toISOString(),
-        labelIds: [],
-      });
-      expect(result.success).toBe(false);
-    });
-
-    it("rejects non-date receivedAt", () => {
-      const result = MailListItemSchema.safeParse({
-        id: "1",
-        threadId: "t1",
-        subject: "",
-        from: "",
-        snippet: "",
-        receivedAt: "not-a-date",
-        unread: false,
         labelIds: [],
       });
       expect(result.success).toBe(false);
@@ -97,6 +102,7 @@ describe("Mail schemas", () => {
       bodyHtml: "<p>html</p>",
       bodyText: "text",
       attachments: [],
+      inlineImages: [],
     };
 
     it("accepts a valid message", () => {
@@ -104,11 +110,36 @@ describe("Mail schemas", () => {
       expect(result.id).toBe("msg_1");
     });
 
+    it("defaults all optional fields to safe values when missing", () => {
+      const result = MailMessageSchema.parse({ id: "msg_2" });
+      expect(result.threadId).toBe("");
+      expect(result.subject).toBe("");
+      expect(result.from).toBe("");
+      expect(result.to).toBe("");
+      expect(result.cc).toBe("");
+      expect(result.date).toBeNull();
+      expect(result.snippet).toBe("");
+      expect(result.bodyHtml).toBe("");
+      expect(result.bodyText).toBe("");
+      expect(result.attachments).toEqual([]);
+      expect(result.inlineImages).toEqual([]);
+    });
+
+    it("accepts null date", () => {
+      const result = MailMessageSchema.parse({ id: "1", date: null });
+      expect(result.date).toBeNull();
+    });
+
     it("rejects attachments with extra keys", () => {
       const result = MailMessageSchema.safeParse({
         ...validMessage,
         attachments: [{ extra: true }],
       });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects missing id (id is required)", () => {
+      const result = MailMessageSchema.safeParse({ subject: "no id" });
       expect(result.success).toBe(false);
     });
   });
@@ -158,20 +189,19 @@ describe("Mail schemas", () => {
         threadsTotal: 50,
         historyId: "12345",
         cachedAt: new Date().toISOString(),
+        name: "Me",
+        picture: "https://example.com/p.png",
       };
       const result = MailProfileSchema.parse(input);
       expect(result.emailAddress).toBe("me@gmail.com");
     });
 
-    it("rejects invalid cachedAt", () => {
-      const result = MailProfileSchema.safeParse({
-        emailAddress: "me@gmail.com",
-        messagesTotal: 0,
-        threadsTotal: 0,
-        historyId: "0",
-        cachedAt: "now",
-      });
-      expect(result.success).toBe(false);
+    it("accepts minimal profile (only required field)", () => {
+      const result = MailProfileSchema.parse({});
+      expect(result.emailAddress).toBe("");
+      expect(result.messagesTotal).toBe(0);
+      expect(result.threadsTotal).toBe(0);
+      expect(result.historyId).toBe("");
     });
   });
 
@@ -181,6 +211,7 @@ describe("Mail schemas", () => {
         items: [],
         nextPageToken: null,
         source: "live",
+        totalCount: 0,
       };
       const result = MailListResponseSchema.parse(input);
       expect(result.source).toBe("live");
@@ -191,18 +222,25 @@ describe("Mail schemas", () => {
         items: [],
         nextPageToken: null,
         source: "invalid",
+        totalCount: 0,
       });
       expect(result.success).toBe(false);
     });
   });
 
+  /**
+   * Regression: the query schema used to be `z.enum(["true", "false"])`
+   * which threw 400 on `?refresh=` (empty). The fix relaxed it to
+   * `z.string().optional()` so any value passes through to the
+   * `query.refresh === "true"` check in the route.
+   */
   describe("MailThreadsQuerySchema", () => {
     it("parses default values when omitted", () => {
       const result = MailThreadsQuerySchema.parse({});
       expect(result.page).toBe(0);
       expect(result.pageSize).toBe(50);
-      expect(result.refresh).toBe("false");
       expect(result.token).toBeUndefined();
+      expect(result.refresh).toBeUndefined();
     });
 
     it("rejects negative page", () => {
@@ -238,21 +276,39 @@ describe("Mail schemas", () => {
       expect(result.refresh).toBe("true");
     });
 
-    it("rejects invalid refresh value", () => {
-      const result = MailThreadsQuerySchema.safeParse({ refresh: "yes" });
-      expect(result.success).toBe(false);
+    it("accepts any refresh string (relaxed from strict enum)", () => {
+      // The old strict-enum behavior rejected "yes", "", or any non-true/false
+      // value with 400. The fix accepts any string and the route does the
+      // boolean coercion with `query.refresh === "true"`.
+      expect(MailThreadsQuerySchema.parse({ refresh: "yes" }).refresh).toBe("yes");
+      expect(MailThreadsQuerySchema.parse({ refresh: "" }).refresh).toBe("");
     });
   });
 
+  /**
+   * Regression: this is the schema that caused the "Invalid request" 400
+   * on click when the SDK validation pipeline threw. See notes above.
+   */
   describe("MailMessageQuerySchema", () => {
-    it("parses default refresh false", () => {
+    it("returns undefined refresh when omitted", () => {
       const result = MailMessageQuerySchema.parse({});
-      expect(result.refresh).toBe("false");
+      expect(result.refresh).toBeUndefined();
     });
 
-    it("accepts refresh true", () => {
+    it("accepts refresh true (route will force-fetch)", () => {
       const result = MailMessageQuerySchema.parse({ refresh: "true" });
       expect(result.refresh).toBe("true");
+    });
+
+    it("accepts empty refresh string without throwing", () => {
+      // Regression: the old `z.enum(["true","false"])` threw ZodError on "".
+      const result = MailMessageQuerySchema.parse({ refresh: "" });
+      expect(result.refresh).toBe("");
+    });
+
+    it("accepts arbitrary refresh string (no enum)", () => {
+      const result = MailMessageQuerySchema.parse({ refresh: "garbage" });
+      expect(result.refresh).toBe("garbage");
     });
   });
 

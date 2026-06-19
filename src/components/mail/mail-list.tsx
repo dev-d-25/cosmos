@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { cn, decodeHtmlEntities } from "@/lib/utils";
 import { MailTag } from "./mail-tag";
@@ -9,6 +9,129 @@ import { StarIcon } from "lucide-react";
 import type { MailListItem } from "@/server/mail/schemas";
 import { formatReceived } from "@/lib/mail/format";
 import { isReadLocally } from "@/lib/read-emails";
+import { usePrefetchFullBody } from "@/hooks/use-mail";
+
+const PREFETCH_DWELL_MS = 200;
+const PREFETCH_VISIBLE_RATIO = 0.5;
+
+/**
+ * One row in the mail list. Owns its own IntersectionObserver: when ≥50%
+ * of the row is visible for 200ms, fires onPrefetch once. The parent
+ * passes a Set-tracked callback so duplicates across rows are deduped.
+ */
+function MailListRow({
+  item,
+  isSelected,
+  isRead,
+  onSelect,
+  onOpen,
+  onPrefetch,
+}: {
+  item: MailListItem;
+  isSelected: boolean;
+  isRead: boolean;
+  onSelect: (id: string) => void;
+  onOpen?: (id: string) => void;
+  onPrefetch: (id: string) => void;
+}) {
+  const ref = useRef<HTMLButtonElement>(null);
+  const firedRef = useRef(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    firedRef.current = false;
+
+    let dwellTimer: number | null = null;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        const entry = entries[0];
+        if (!entry) return;
+        if (entry.isIntersecting && entry.intersectionRatio >= PREFETCH_VISIBLE_RATIO) {
+          if (dwellTimer === null && !firedRef.current) {
+            dwellTimer = window.setTimeout(() => {
+              firedRef.current = true;
+              onPrefetch(item.id);
+              dwellTimer = null;
+            }, PREFETCH_DWELL_MS);
+          }
+        } else if (dwellTimer !== null) {
+          clearTimeout(dwellTimer);
+          dwellTimer = null;
+        }
+      },
+      { threshold: PREFETCH_VISIBLE_RATIO },
+    );
+
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      if (dwellTimer !== null) clearTimeout(dwellTimer);
+    };
+  }, [item.id, onPrefetch]);
+
+  return (
+    <button
+      ref={ref}
+      type="button"
+      onClick={() => onSelect(item.id)}
+      onDoubleClick={() => onOpen?.(item.id)}
+      data-message-id={item.id}
+      data-selected={isSelected ? "true" : "false"}
+      aria-current={isSelected ? "true" : undefined}
+      className={cn(
+        "border-border hover:bg-accent block w-full border-b border-l-2 border-l-transparent px-4 py-3 text-left transition",
+        isRead ? "bg-muted" : "",
+        isSelected && "bg-accent border-l-primary",
+      )}
+    >
+      <div className="mb-1 flex items-center gap-2">
+        <span
+          className={cn(
+            "size-1.5 shrink-0 rounded-full",
+            isRead ? "bg-muted-foreground" : "bg-primary",
+          )}
+        />
+        <span className="truncate text-sm font-semibold">
+          {decodeHtmlEntities(item.from) || "(unknown sender)"}
+        </span>
+        <span className="text-muted-foreground shrink-0 text-[0.625rem]">
+          {formatReceived(item.receivedAt)}
+        </span>
+      </div>
+      <p className="truncate pl-3.5 text-xs font-medium">
+        {decodeHtmlEntities(item.subject) || "(no subject)"}
+      </p>
+      <p className="text-muted-foreground truncate pl-3.5 text-[0.625rem]">
+        {decodeHtmlEntities(item.snippet)}
+      </p>
+      {item.labelIds.length > 0 ? (
+        <div className="mt-1 flex flex-wrap gap-1 pl-3.5">
+          {item.labelIds
+            .filter(
+              (l) =>
+                ![
+                  "INBOX",
+                  "UNREAD",
+                  "IMPORTANT",
+                  "CATEGORY_PERSONAL",
+                  "CATEGORY_SOCIAL",
+                  "CATEGORY_UPDATES",
+                  "CATEGORY_PROMOTIONS",
+                  "CATEGORY_FORUMS",
+                ].includes(l),
+            )
+            .slice(0, 3)
+            .map((label) => (
+              <MailTag key={label}>
+                {label.replace(/^CATEGORY_/, "").replace(/^Label_/, "")}
+              </MailTag>
+            ))}
+        </div>
+      ) : null}
+    </button>
+  );
+}
 
 export function MailList({
   items,
@@ -39,6 +162,32 @@ export function MailList({
   searchQuery?: string;
   onClearSearch?: () => void;
 }) {
+  const prefetchMutation = usePrefetchFullBody();
+  const inflightRef = useRef<Set<string>>(new Set());
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const onPrefetch = useCallback(
+    (id: string) => {
+      // Dedupe: don't fire if a prefetch for this id is already in flight.
+      if (inflightRef.current.has(id)) return;
+      inflightRef.current.add(id);
+      prefetchMutation.mutate(id, {
+        onSettled: () => {
+          inflightRef.current.delete(id);
+        },
+      });
+    },
+    [prefetchMutation],
+  );
+
+  useEffect(() => {
+    if (!selectedId || !scrollRef.current) return;
+    const el = scrollRef.current.querySelector(`[data-message-id="${selectedId}"]`);
+    if (el) {
+      el.scrollIntoView({ block: "nearest" });
+    }
+  }, [selectedId]);
+
   if (isInitialLoading) {
     return (
       <div className="border-border bg-card flex min-w-0 flex-col border-r">
@@ -81,7 +230,7 @@ export function MailList({
                 className="text-muted-foreground hover:text-foreground ml-1 inline-flex size-4 items-center justify-center rounded-full hover:bg-muted"
               >
                 <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <path d="M18 6L6 18M6 6l12 12" />
+                  <path d="M18 6L6 18M6 6l12 18" />
                 </svg>
               </button>
             </div>
@@ -97,16 +246,6 @@ export function MailList({
       </div>
     );
   }
-
-  const scrollRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!selectedId || !scrollRef.current) return;
-    const el = scrollRef.current.querySelector(`[data-message-id="${selectedId}"]`);
-    if (el) {
-      el.scrollIntoView({ block: "nearest" });
-    }
-  }, [selectedId]);
 
   return (
     <div className="border-border bg-card flex min-w-0 flex-col border-r">
@@ -147,65 +286,15 @@ export function MailList({
           const isSelected = selectedId === item.id;
           const isRead = !item.unread || isReadLocally(item.id);
           return (
-            <button
+            <MailListRow
               key={item.id}
-              type="button"
-              onClick={() => onSelect(item.id)}
-              onDoubleClick={() => onOpen?.(item.id)}
-              data-message-id={item.id}
-              data-selected={isSelected ? "true" : "false"}
-              aria-current={isSelected ? "true" : undefined}
-              className={cn(
-                "border-border hover:bg-accent block w-full border-b border-l-2 border-l-transparent px-4 py-3 text-left transition",
-                isRead ? "bg-muted" : "",
-                isSelected && "bg-accent border-l-primary",
-              )}
-            >
-              <div className="mb-1 flex items-center gap-2">
-                <span
-                  className={cn(
-                    "size-1.5 shrink-0 rounded-full",
-                    isRead ? "bg-muted-foreground" : "bg-primary",
-                  )}
-                />
-                <span className="truncate text-sm font-semibold">
-                  {decodeHtmlEntities(item.from) || "(unknown sender)"}
-                </span>
-                <span className="text-muted-foreground shrink-0 text-[0.625rem]">
-                  {formatReceived(item.receivedAt)}
-                </span>
-              </div>
-              <p className="truncate pl-3.5 text-xs font-medium">
-                {decodeHtmlEntities(item.subject) || "(no subject)"}
-              </p>
-              <p className="text-muted-foreground truncate pl-3.5 text-[0.625rem]">
-                {decodeHtmlEntities(item.snippet)}
-              </p>
-              {item.labelIds.length > 0 ? (
-                <div className="mt-1 flex flex-wrap gap-1 pl-3.5">
-                  {item.labelIds
-                    .filter(
-                      (l) =>
-                        ![
-                          "INBOX",
-                          "UNREAD",
-                          "IMPORTANT",
-                          "CATEGORY_PERSONAL",
-                          "CATEGORY_SOCIAL",
-                          "CATEGORY_UPDATES",
-                          "CATEGORY_PROMOTIONS",
-                          "CATEGORY_FORUMS",
-                        ].includes(l),
-                    )
-                    .slice(0, 3)
-                    .map((label) => (
-                      <MailTag key={label}>
-                        {label.replace(/^CATEGORY_/, "").replace(/^Label_/, "")}
-                      </MailTag>
-                    ))}
-                </div>
-              ) : null}
-            </button>
+              item={item}
+              isSelected={isSelected}
+              isRead={isRead}
+              onSelect={onSelect}
+              onOpen={onOpen}
+              onPrefetch={onPrefetch}
+            />
           );
         })}
       </div>

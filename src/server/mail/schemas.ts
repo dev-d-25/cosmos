@@ -44,8 +44,8 @@ export const MailLabelSchema = z.object({
   id: z.string(),
   name: z.string().optional().default(""),
   type: z.enum(["system", "user"]).optional().default("system"),
-  messagesTotal: z.number().optional().default(0),
-  messagesUnread: z.number().optional().default(0),
+  messagesTotal: z.number().int().nonnegative().optional().default(0),
+  messagesUnread: z.number().int().nonnegative().optional().default(0),
   color: z.string().nullable().optional().default(null),
 });
 
@@ -70,11 +70,11 @@ export const MailThreadsQuerySchema = z.object({
   page: z.coerce.number().int().min(0).default(0),
   pageSize: z.coerce.number().int().positive().max(100).default(50),
   token: z.string().optional(),
-  refresh: z.enum(["true", "false"]).default("false"),
+  refresh: z.string().optional(),
 });
 
 export const MailMessageQuerySchema = z.object({
-  refresh: z.enum(["true", "false"]).default("false"),
+  refresh: z.string().optional(),
 });
 
 export const GetProfileApiResponseSchema = z.object({

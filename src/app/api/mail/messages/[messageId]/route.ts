@@ -15,20 +15,32 @@ export async function GET(
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
+  const { messageId } = await params;
+
+  // Parse the query separately so only query errors return 400.
+  // Any other ZodError (from SDK internals, etc.) is a 500.
+  const rawRefresh = new URL(_req.url).searchParams.get("refresh") ?? undefined;
+  let query: { refresh?: string };
   try {
-    const { messageId } = await params;
-    const rawRefresh = new URL(_req.url).searchParams.get("refresh") ?? undefined;
+    query = MailMessageQuerySchema.parse({ refresh: rawRefresh });
+  } catch (err) {
+    if (err instanceof z.ZodError) {
+      return NextResponse.json(
+        { error: "Invalid query", details: err.issues },
+        { status: 400 },
+      );
+    }
+    throw err;
+  }
 
-    const query = MailMessageQuerySchema.parse({
-      refresh: rawRefresh,
-    });
-
+  try {
     const result = await getMessage(messageId, { force: query.refresh === "true" });
     if (!result) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
     const transformed = toMailMessage(result.message);
     const parsed = MailMessageSchema.safeParse(transformed);
     if (!parsed.success) {
+      console.error("[mail] Invalid message data shape:", parsed.error.issues);
       return NextResponse.json(
         { error: "Invalid message data" },
         { status: 500 },
@@ -43,9 +55,7 @@ export async function GET(
     if (err instanceof AuthMissingError) {
       return NextResponse.json({ error: "gmail_not_connected" }, { status: 409 });
     }
-    if (err instanceof z.ZodError) {
-      return NextResponse.json({ error: "Invalid request", details: err.issues }, { status: 400 });
-    }
+    console.error("[mail] getMessage failed:", err);
     const message = err instanceof Error ? err.message : String(err);
     return NextResponse.json({ error: message }, { status: 500 });
   }

@@ -111,6 +111,18 @@ export const mailKeys = {
   profile: () => [...mailKeys.all, "profile"] as const,
 };
 
+async function fetchPrefetchMessage(id: string): Promise<{ id: string; ok: boolean; error?: string }> {
+  const res = await fetch(`/api/mail/messages/${encodeURIComponent(id)}/prefetch`, {
+    method: "POST",
+    cache: "no-store",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? `Prefetch failed (${res.status})`);
+  }
+  return res.json();
+}
+
 // ─── Hooks ─────────────────────────────────────────────────────────────────────
 
 export function useMailThreads(opts: {
@@ -173,6 +185,19 @@ export function useRefreshInbox() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: mailKeys.all });
     },
+  });
+}
+
+/**
+ * Fire-and-forget prefetch of a message's full body. Writes to the local
+ * DB so the next useMailMessage(id) call hits cache instead of Gmail.
+ *
+ * Caller is responsible for deduplicating per id (use a Set in the parent
+ * component — TanStack useMutation does not dedupe by arg).
+ */
+export function usePrefetchFullBody() {
+  return useMutation({
+    mutationFn: fetchPrefetchMessage,
   });
 }
 

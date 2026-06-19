@@ -34,6 +34,7 @@ const ENRICH_CONCURRENCY = 10;
 const CACHE_PAGE_TOKEN_PREFIX = "cache:";
 const FILTERED_LABEL_CACHE_FETCH_MULTIPLIER = 10;
 const FILTERED_LABEL_CACHE_FETCH_CAP = 1000;
+const ENRICH_HEADERS = ["Subject", "From", "To", "Date"];
 
 // ─── Response cache (Phase 5) ──────────────────────────────────────────────
 const mailListCache = new Map<string, { data: MailListResponse; at: number }>();
@@ -111,7 +112,6 @@ async function enrichStubs(
     return;
   }
 
-  const ENRICH_HEADERS = ["Subject", "From", "To", "Date"];
   let succeeded = 0;
   let failed = 0;
 
@@ -202,6 +202,64 @@ function parseCachePageToken(token: string | null | undefined): number | null {
     return null;
   const parsed = Number(token.slice(CACHE_PAGE_TOKEN_PREFIX.length));
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+}
+
+/**
+ * Raw fetch of a single message with full body, then atomic upsert via the
+ * native ON CONFLICT helper. Bypasses the corsair SDK's `messages.get`,
+ * which would auto-persist through its 3-query upsertByEntityId.
+ *
+ * Single Gmail API call + single DB round-trip. Returned shape mirrors
+ * the SDK response so callers can swap it in transparently.
+ */
+async function fetchAndPersistFullBody(
+  accountId: string,
+  client: ReturnType<typeof corsair.withTenant>,
+  id: string,
+): Promise<Record<string, unknown>> {
+  const accessToken = await client.gmail.keys.get_access_token();
+  if (!accessToken) {
+    throw new Error("no_access_token");
+  }
+
+  const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`;
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`gmail_${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
+  }
+
+  const raw = (await res.json()) as Record<string, unknown>;
+  const payload = raw.payload as
+    | { headers?: Array<{ name?: string; value?: string }> }
+    | undefined;
+  const headers = payload?.headers ?? [];
+  const get = (name: string) =>
+    headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value;
+
+  // NOTE: do NOT store `body: raw.payload` here. The corsair SDK's
+  // messages entity schema declares `body: z.string().optional()` and
+  // validates the row on every read via findByEntityId. Storing an object
+  // there throws ZodError → "Invalid request" 400 on the click. The
+  // payload is already preserved separately and the getMessage hasBody
+  // check inspects payload.parts[].body.data directly.
+  await upsertManyByEntityIds(accountId, [
+    {
+      entityId: id,
+      data: {
+        ...(raw as RawMessageEntity),
+        id,
+        subject: get("Subject"),
+        from: get("From"),
+        to: get("To"),
+        createdAt: new Date(),
+      },
+    },
+  ]);
+
+  return raw;
 }
 
 async function getClient() {
@@ -903,7 +961,7 @@ export async function getMessage(
 } | null> {
   const ctx = await getClient();
   if (!ctx) return null;
-  const { client } = ctx;
+  const { accountId, client } = ctx;
 
   if (!opts.force) {
     const cached = await client.gmail.db.messages.findByEntityId(id);
@@ -924,12 +982,31 @@ export async function getMessage(
     }
   }
 
-  const full = (await client.gmail.api.messages.get({
-    id,
-    format: "full",
-  })) as Record<string, unknown>;
+  // Bypass SDK auto-persist: raw fetch + native upsert (1 query each).
+  const full = await fetchAndPersistFullBody(accountId, client, id);
 
   return { message: full, source: "live" };
+}
+
+/**
+ * Fire-and-forget full-body fetch for the prefetch path. Writes to the
+ * local DB; the next getMessage(id) call on the same id returns from cache.
+ */
+export async function prefetchFullBody(
+  id: string,
+): Promise<{ id: string; ok: boolean; error?: string }> {
+  const ctx = await getClient();
+  if (!ctx) return { id, ok: false, error: "unauthenticated" };
+  try {
+    await fetchAndPersistFullBody(ctx.accountId, ctx.client, id);
+    return { id, ok: true };
+  } catch (err) {
+    return {
+      id,
+      ok: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 export async function refreshInbox(): Promise<{ synced: number }> {
