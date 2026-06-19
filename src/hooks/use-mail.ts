@@ -1,24 +1,19 @@
 "use client";
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { MailListResponseSchema, MailMessageSchema, MailLabelsResponseSchema } from "@/server/mail/schemas";
+import { MailMessageSchema, MailLabelsResponseSchema, PAGE_SIZE } from "@/server/mail/schemas";
 import type { MailListResponse, MailMessage, MailLabel, MailProfile } from "@/server/mail/schemas";
 
 // ─── API fetchers ──────────────────────────────────────────────────────────────
 
 async function fetchMailThreads(opts: {
   page?: number;
-  pageSize?: number;
-  token?: string;
-  refresh?: boolean;
   labelIds?: string[];
   q?: string;
 }): Promise<MailListResponse> {
   const params = new URLSearchParams();
-  params.set("page", String(opts.page ?? 0));
-  params.set("pageSize", String(opts.pageSize ?? 50));
-  if (opts.token) params.set("token", opts.token);
-  if (opts.refresh) params.set("refresh", "true");
+  // page is 1-based; backend clamps and echoes.
+  params.set("page", String(opts.page ?? 1));
   if (opts.labelIds?.length) params.set("labelIds", opts.labelIds.join(","));
   if (opts.q) params.set("q", opts.q);
 
@@ -30,7 +25,11 @@ async function fetchMailThreads(opts: {
     throw new Error(body.error ?? `Failed to fetch threads (${res.status})`);
   }
   const json = await res.json();
-  return MailListResponseSchema.parse(json);
+  // The route returns the validated v2 shape (items, count, page,
+  // totalPages, hasMore, hasPrev, cacheState, coverage, source, degraded).
+  // We do not parse through MailListResponseSchema here because we want
+  // the client to read whatever the server sent verbatim.
+  return json as MailListResponse;
 }
 
 async function fetchMailMessage(
@@ -104,7 +103,7 @@ async function clearMailCache(): Promise<{ deletedMessages: number; deletedLabel
 
 export const mailKeys = {
   all: ["mail"] as const,
-  threads: (opts?: { page?: number; pageSize?: number; token?: string; labelIds?: string[]; q?: string }) =>
+  threads: (opts?: { page?: number; labelIds?: string[]; q?: string }) =>
     [...mailKeys.all, "threads", opts] as const,
   message: (id: string) => [...mailKeys.all, "message", id] as const,
   labels: () => [...mailKeys.all, "labels"] as const,
@@ -127,25 +126,19 @@ async function fetchPrefetchMessage(id: string): Promise<{ id: string; ok: boole
 
 export function useMailThreads(opts: {
   page?: number;
-  pageSize?: number;
-  token?: string;
-  refresh?: boolean;
   labelIds?: string[];
   q?: string;
   initialData?: MailListResponse;
 }) {
   return useQuery({
-    queryKey: mailKeys.threads({ page: opts.page, pageSize: opts.pageSize, token: opts.token, labelIds: opts.labelIds, q: opts.q }),
+    queryKey: mailKeys.threads({ page: opts.page, labelIds: opts.labelIds, q: opts.q }),
     queryFn: () => fetchMailThreads(opts),
     initialData: opts.initialData,
     placeholderData: (prev) => prev,
-    // Shorter staleTime so background-sync results show up promptly.
-    staleTime: opts.initialData?.source === "cache" && opts.initialData.items.length === 0 ? 0 : 30 * 1000,
-    refetchInterval: (query) => {
-      const data = query.state.data;
-      return data?.source === "cache" && data.items.length === 0 ? 2_500 : false;
-    },
-    refetchOnWindowFocus: true,
+    staleTime: 30 * 1000,
+    // No polling. The server returns cacheState: "partial" | "empty"
+    // while the background sync fills the gap; the user clicks Refresh
+    // (POST /api/mail/refresh) to advance.
   });
 }
 
@@ -183,7 +176,9 @@ export function useRefreshInbox() {
   return useMutation({
     mutationFn: refreshInbox,
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: mailKeys.all });
+      // Refetch every active mail query. TanStack will re-read params from
+      // each subscriber's useMailThreads call, so the current page reloads.
+      queryClient.invalidateQueries({ queryKey: mailKeys.all, refetchType: "all" });
     },
   });
 }
@@ -207,13 +202,13 @@ export function useClearMailCache() {
   return useMutation({
     mutationFn: clearMailCache,
     onSuccess: () => {
-      queryClient.setQueryData(mailKeys.threads({ page: 0, pageSize: 50, token: undefined, q: undefined }), {
-        items: [],
-        nextPageToken: null,
-        source: "cache" as const,
-        totalCount: 0,
-      });
-      queryClient.invalidateQueries({ queryKey: mailKeys.all });
+      // Invalidate every mail query — no optimistic setQueryData so we
+      // avoid the setQueryData-then-invalidate anti-pattern (PAT-03).
+      queryClient.invalidateQueries({ queryKey: mailKeys.all, refetchType: "all" });
     },
   });
 }
+
+// Re-export PAGE_SIZE so client code that wants to render "Showing N" text
+// can use the same constant the server used.
+export { PAGE_SIZE };

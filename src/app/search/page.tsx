@@ -23,7 +23,7 @@ async function SearchPageInner({ searchParams }: { searchParams: SearchParams })
   let initialResults = undefined;
   if (query.trim()) {
     const [list, profile, labels] = await Promise.all([
-      getMailList({ pageIndex: 0, pageSize: 50, q: query.trim() }),
+      getMailList({ page: 1, q: query.trim() }),
       getProfile(),
       getLabels(),
     ]);

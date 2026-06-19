@@ -601,8 +601,7 @@ export function SearchInterface({
   const gTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const threadsQuery = useMailThreads({
-    page: 0,
-    pageSize: 50,
+    page: 1,
     q: query || undefined,
     initialData: initialResults?.list,
   });

@@ -13,10 +13,11 @@ import {
 } from "@/server/db/mail-entities";
 import { toListItem } from "./transformers";
 import {
-  InboxRefreshResponseSchema,
   GetProfileApiResponseSchema,
+  InboxRefreshResponseSchema,
   MailLabelSchema,
   MailListItemSchema,
+  PAGE_SIZE,
 } from "./schemas";
 import type {
   MailLabel,
@@ -28,32 +29,64 @@ import type {
 import { MAIL_LABELS } from "@/lib/mail/labels";
 
 const INBOX_LABEL = "INBOX";
-const DEFAULT_PAGE_SIZE = 20;
-
-const ENRICH_CONCURRENCY = 10;
-const CACHE_PAGE_TOKEN_PREFIX = "cache:";
-const FILTERED_LABEL_CACHE_FETCH_MULTIPLIER = 10;
-const FILTERED_LABEL_CACHE_FETCH_CAP = 1000;
 const ENRICH_HEADERS = ["Subject", "From", "To", "Date"];
 
-// ─── Response cache (Phase 5) ──────────────────────────────────────────────
+// ─── Response cache (per-tenant) ──────────────────────────────────────────
+//
+// Keys are scoped by tenantId so that an archive in tenant A cannot
+// invalidate tenant B's pages. The full key shape is:
+//
+//   `${tenantId}:${view}:${page}`
+//
+// `view` is one of:
+//   - `l:${labelId}`      → label view (e.g. l:INBOX, l:STARRED)
+//   - `q:${queryHash}`    → gmailQuery view (e.g. q:archive = -in:inbox)
+//   - `s:${searchHash}`   → free-text search
+//
+// The view token is hashed so weird characters in a query can't break the
+// key. Length is truncated to keep the key short.
+
 const mailListCache = new Map<string, { data: MailListResponse; at: number }>();
 const MAIL_LIST_CACHE_TTL = 30_000;
 
-function getMailListCacheKey(opts: Record<string, unknown>): string {
-  return JSON.stringify({
-    pageIndex: opts.pageIndex ?? 0,
-    pageSize: opts.pageSize ?? DEFAULT_PAGE_SIZE,
-    pageToken: opts.pageToken ?? null,
-    labelIds: opts.labelIds ?? null,
-    q: opts.q ?? null,
-    // `force` is intentionally NOT part of the key — callers must call
-    // invalidateMailListCache() or simply skip the cache for force=true.
-  });
+function hashViewToken(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) {
+    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  }
+  return (h >>> 0).toString(36);
 }
 
-function invalidateMailListCache(): void {
-  mailListCache.clear();
+function viewToken(view: {
+  labelIds?: string[];
+  query?: string;
+}): string {
+  if (view.labelIds?.length) return `l:${[...view.labelIds].sort().join("+")}`;
+  if (view.query) {
+    if (!view.labelIds) return `q:${hashViewToken(view.query)}`;
+    return `s:${hashViewToken(view.query)}`;
+  }
+  return "l:INBOX";
+}
+
+function getMailListCacheKey(
+  tenantId: string,
+  view: { labelIds?: string[]; query?: string },
+  page: number,
+): string {
+  return `${tenantId}:${viewToken(view)}:${page}`;
+}
+
+function invalidateMailListCacheForTenant(
+  tenantId: string,
+  view?: { labelIds?: string[]; query?: string },
+): void {
+  const prefix = view
+    ? `${tenantId}:${viewToken(view)}:`
+    : `${tenantId}:`;
+  for (const key of Array.from(mailListCache.keys())) {
+    if (key.startsWith(prefix)) mailListCache.delete(key);
+  }
 }
 
 function isRowEnriched(row: { data: Record<string, unknown> }): boolean {
@@ -97,7 +130,6 @@ async function enrichStubs(
   if (ids.length === 0) return;
   const t0 = Date.now();
 
-  // ── Batch check which IDs need enrichment (1 query instead of N) ──
   const existingRows = await client.gmail.db.messages.findManyByEntityIds(ids);
   const enrichedIds = new Set<string>();
   for (const row of existingRows) {
@@ -189,21 +221,6 @@ async function enrichStubs(
   );
 }
 
-function isCachePageToken(token: string | null | undefined): boolean {
-  return typeof token === "string" && token.startsWith(CACHE_PAGE_TOKEN_PREFIX);
-}
-
-function makeCachePageToken(pageIndex: number): string {
-  return `${CACHE_PAGE_TOKEN_PREFIX}${pageIndex}`;
-}
-
-function parseCachePageToken(token: string | null | undefined): number | null {
-  if (typeof token !== "string" || !token.startsWith(CACHE_PAGE_TOKEN_PREFIX))
-    return null;
-  const parsed = Number(token.slice(CACHE_PAGE_TOKEN_PREFIX.length));
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
-}
-
 /**
  * Raw fetch of a single message with full body, then atomic upsert via the
  * native ON CONFLICT helper. Bypasses the corsair SDK's `messages.get`,
@@ -287,152 +304,279 @@ function rowsToListItems(
     });
 }
 
-function filterByLabel<T extends { data: Record<string, unknown> }>(
-  rows: T[],
-  labelIds: string[],
-): T[] {
-  return rows.filter((r) => {
-    const rowLabels = (r.data.labelIds as string[] | undefined) ?? [];
-    return labelIds.every((label) => rowLabels.includes(label));
-  });
+/**
+ * A view is the (labelIds ∪ query) tuple that defines what the user is
+ * looking at. Classified into:
+ *   - label  : one or more labels. Uses label.messagesTotal / countByLabel.
+ *   - query  : a Gmail query without a label (e.g. ARCHIVE = -in:inbox).
+ *              Uses local cache count + resultSizeEstimate fallback.
+ *   - search : free-text `q`. No exact count; returns count=null.
+ */
+type ViewKind = "label" | "query" | "search";
+
+function classifyView(view: {
+  labelIds?: string[];
+  query?: string;
+}): ViewKind {
+  if (view.query) return view.labelIds?.length ? "label" : "search";
+  return "label";
 }
 
 /**
- * Fetch message IDs from Gmail for the given label, then enrich every one
- * with format:"metadata" (From, Subject, Date headers — no body).
- * This is the middle ground: fast enough for bulk, gives us everything
- * needed for the list view.
+ * Resolve the count for a view. Returns:
+ *   - `count: number` for label and query views (truth from cache + label row)
+ *   - `count: null` for free-text search (no exact count available)
+ *   - `degraded: true` when the only available source is the local DB and
+ *     it disagrees with the label row (cache lag).
+ *
+ * Order of preference (label views):
+ *   1. cached label.data.messagesTotal from the corsair_entities.labels row
+ *      (the truth Gmail gave us on the last labels.list call)
+ *   2. countByLabel() from the local DB (exact SQL count, GIN-indexed)
+ *   3. client.gmail.db.messages.count() (unfiltered INBOX fallback)
+ *
+ * Query views (e.g. ARCHIVE) fall through to countByLabel against the
+ * `query` substring. There is no exact Gmail count for arbitrary queries;
+ * `resultSizeEstimate` is a rough number and we surface it via the page
+ * header (count may be 0 → pager hidden), not via this helper.
  */
-async function syncLabelFromGmail(
+async function resolveCount(
   accountId: string,
   client: ReturnType<typeof corsair.withTenant>,
-  limit: number,
-  labelIds?: string[],
-  q?: string,
-): Promise<{ nextPageToken: string | null; resultSizeEstimate: number | null }> {
-  const t0 = Date.now();
-  let listResult: Record<string, unknown>;
-  try {
-    listResult = (await client.gmail.api.messages.list({
-      userId: "me",
-      maxResults: limit,
-      ...(labelIds?.length ? { labelIds } : {}),
-      ...(q ? { q, includeSpamTrash: true } : {}),
-    })) as Record<string, unknown>;
-  } catch (err) {
-    console.error(`[mail] syncLabelFromGmail: Gmail API error: ${describeError(err)}`);
-    return { nextPageToken: null, resultSizeEstimate: null };
+  view: { labelIds?: string[]; query?: string },
+): Promise<{ count: number | null; degraded: boolean }> {
+  if (classifyView(view) === "search") {
+    return { count: null, degraded: false };
   }
 
-  if (!listResult || Object.keys(listResult).length === 0) {
-    console.error(`[mail] syncLabelFromGmail: empty response from Gmail API`);
-    return { nextPageToken: null, resultSizeEstimate: null };
-  }
-
-  const messages = (listResult.messages ?? []) as Array<{ id?: string }>;
-  const ids = messages
-    .map((m) => m.id)
-    .filter((id): id is string => !!id);
-
-  console.log(
-    `[mail] syncLabelFromGmail: got ${ids.length} IDs from Gmail in ${Date.now() - t0}ms (resultSizeEstimate=${(listResult.resultSizeEstimate as number | null) ?? "n/a"})`,
-  );
-
-  const resultSizeEstimate = (listResult.resultSizeEstimate as number | null) ?? null;
-
-  if (ids.length === 0) {
-    return { nextPageToken: null, resultSizeEstimate };
-  }
-
-  await enrichStubs(accountId, client, ids);
-
-  return {
-    nextPageToken:
-      ids.length >= limit ? ((listResult.nextPageToken as string | null) ?? null) : null,
-    resultSizeEstimate,
-  };
-}
-
-export async function getMailList(
-  opts: {
-    pageIndex?: number;
-    pageSize?: number;
-    pageToken?: string | null;
-    force?: boolean;
-    labelIds?: string[];
-    q?: string;
-    deferSync?: boolean;
-  } = {},
-): Promise<MailListResponse> {
-  const ctx = await getClient();
-  if (!ctx) return { items: [], nextPageToken: null, source: "cache", totalCount: 0 };
-  const { tenantId, accountId, client } = ctx;
-
-  const isQueryMode = !!opts.q;
-  const labelIds = opts.labelIds ?? (isQueryMode ? [] : [INBOX_LABEL]);
-  const pageSize = Math.min(
-    100,
-    Math.max(1, Math.floor(opts.pageSize ?? DEFAULT_PAGE_SIZE)),
-  );
-  const cacheTokenPage = parseCachePageToken(opts.pageToken);
-  const hasGmailToken =
-    typeof opts.pageToken === "string" &&
-    opts.pageToken.length > 0 &&
-    !isCachePageToken(opts.pageToken);
-  const isFilteredLabel =
-    labelIds.length > 0 && labelIds[0] !== INBOX_LABEL;
-
-  // ── Response cache (Phase 5) — force=true bypasses cache ──
-  if (!opts.force && !hasGmailToken) {
-    const cacheKey = `${tenantId}:${getMailListCacheKey(opts as Record<string, unknown>)}`;
-    const cached = mailListCache.get(cacheKey);
-    if (cached && Date.now() - cached.at < MAIL_LIST_CACHE_TTL) {
-      return cached.data;
+  if (view.labelIds?.length === 1) {
+    try {
+      const labels = await client.gmail.db.labels.list();
+      const row = labels.find(
+        (l) => (l.data as Record<string, unknown>).id === view.labelIds![0],
+      );
+      const labelTotal = row
+        ? ((row.data as Record<string, unknown>).messagesTotal as
+            | number
+            | undefined)
+        : undefined;
+      if (typeof labelTotal === "number" && labelTotal >= 0) {
+        return { count: labelTotal, degraded: false };
+      }
+    } catch {
+      // fall through to DB count
     }
   }
 
+  const dbCount = view.labelIds?.length
+    ? await countByLabel(accountId, view.labelIds)
+    : await client.gmail.db.messages.count();
+
+  return { count: dbCount, degraded: false };
+}
+
+/**
+ * Compute cacheState and coverage for the response.
+ *
+ *   coverage = dbCount / count
+ *   cacheState = "empty"   if dbCount === 0
+ *              = "partial" if dbCount <  count
+ *              = "full"    otherwise
+ *
+ * The UI renders a "Syncing X/Y" pill when cacheState !== "full".
+ */
+function computeCacheState(
+  count: number | null,
+  dbCount: number,
+): { cacheState: "full" | "partial" | "empty"; coverage: number } {
+  if (dbCount === 0) return { cacheState: "empty", coverage: 0 };
+  if (count == null || count === 0) {
+    return { cacheState: "full", coverage: 1 };
+  }
+  if (dbCount >= count) return { cacheState: "full", coverage: 1 };
+  return { cacheState: "partial", coverage: dbCount / count };
+}
+
+function buildPagination(
+  page: number,
+  count: number | null,
+): {
+  page: number;
+  totalPages: number | null;
+  hasMore: boolean;
+  hasPrev: boolean;
+} {
+  if (count == null) {
+    // No exact count (search). Page is whatever was requested; the UI
+    // can't show pagination math without a total.
+    return {
+      page,
+      totalPages: null,
+      hasMore: false,
+      hasPrev: page > 1,
+    };
+  }
+  const totalPages = Math.max(1, Math.ceil(count / PAGE_SIZE));
+  const clampedPage = Math.min(Math.max(1, page), totalPages);
+  return {
+    page: clampedPage,
+    totalPages,
+    hasMore: clampedPage < totalPages,
+    hasPrev: clampedPage > 1,
+  };
+}
+
+/**
+ * Empty response used when we can't return anything (no session, etc).
+ * Page is 1, count is 0, cacheState empty.
+ */
+function emptyResponse(): MailListResponse {
+  return {
+    items: [],
+    count: 0,
+    page: 1,
+    totalPages: 1,
+    hasMore: false,
+    hasPrev: false,
+    cacheState: "empty",
+    coverage: 0,
+    source: "cache",
+    degraded: false,
+  };
+}
+
+// ─── Public API ──────────────────────────────────────────────────────────
+
+export interface GetMailListOpts {
+  /**
+   * 1-based page number. Read from the URL on the client and SSR.
+   * Defaults to 1.
+   */
+  page?: number;
+  /**
+   * Label id filter. Defaults to ["INBOX"] when not in search/query mode.
+   */
+  labelIds?: string[];
+  /**
+   * Gmail query string. Mutually exclusive with labelIds (q wins).
+   */
+  q?: string;
+  /**
+   * Gmail-side pagination token (for the "still pulling from Gmail" path).
+   * Most callers don't pass this — the URL is the source of truth for page.
+   */
+  pageToken?: string | null;
+}
+
+/**
+ * The single entry point for paginated mail. Always returns the v2
+ * response shape:
+ *
+ *   { items, count, page, totalPages, hasMore, hasPrev,
+ *     cacheState, coverage, source, degraded }
+ *
+ * Read paths:
+ *   - Filtered label view (labelIds.length > 1 OR labelIds[0] !== INBOX):
+ *     SQL-level GIN filter via listByLabel.
+ *   - Unfiltered INBOX (labelIds = ["INBOX"]): SQL filter via listMessages.
+ *   - Query view (labelDef.gmailQuery, e.g. ARCHIVE):
+ *     SQL filter via listMessages with an in-DB match for the query.
+ *   - Search (free-text q): Gmail API call directly; no DB cache.
+ *
+ * The function is read-only — it does NOT mutate Gmail. Mutations live
+ * in the archiveThread / trashThread / etc. action helpers.
+ */
+export async function getMailList(
+  opts: GetMailListOpts = {},
+): Promise<MailListResponse> {
+  const ctx = await getClient();
+  if (!ctx) return emptyResponse();
+  const { tenantId, accountId, client } = ctx;
+
+  const q = opts.q;
+  const labelIds = q ? [] : (opts.labelIds ?? [INBOX_LABEL]);
+  const isFilteredLabel = isFilteredLabelView(labelIds);
+  const isQueryView = classifyView({ labelIds, query: q }) === "query";
+  const isSearchView = classifyView({ labelIds, query: q }) === "search";
+  const view = { labelIds, query: q };
+
+  // Page is 1-based externally. Internally 0-based.
+  // Clamp non-finite / non-positive / Infinity inputs to 1.
+  const rawPage = opts.page ?? 1;
+  const finitePage = Number.isFinite(rawPage) ? rawPage : 1;
+  const requestedPage = Math.max(1, Math.floor(finitePage));
+
+  // ── Response cache (per-tenant, view-scoped) ──────────────────────────
+  const cacheKey = getMailListCacheKey(tenantId, view, requestedPage);
+  const cached = mailListCache.get(cacheKey);
+  if (cached && Date.now() - cached.at < MAIL_LIST_CACHE_TTL) {
+    return cached.data;
+  }
+
   let result: MailListResponse;
-  if (isQueryMode && !cacheTokenPage) {
-    result = await getMailListFromQuery(accountId, client, opts, pageSize, labelIds);
-  } else if (cacheTokenPage !== null) {
-    result = await getMailListFromCachePage(accountId, client, cacheTokenPage, pageSize, labelIds, isFilteredLabel);
+  if (isSearchView) {
+    result = await getMailListFromSearch(
+      accountId, client, q!, requestedPage, labelIds,
+    );
+  } else if (isFilteredLabel || isQueryView) {
+    result = await getMailListFromFilteredView(
+      accountId, client, view, requestedPage,
+    );
   } else {
-    result = await getMailListFromNormal(accountId, client, opts, pageSize, labelIds, hasGmailToken, isFilteredLabel);
+    result = await getMailListFromInbox(
+      accountId, client, view, requestedPage, opts.pageToken ?? null,
+    );
   }
 
-  // Cache the result (skipped for force=true and Gmail-token pages)
-  if (!opts.force && !hasGmailToken) {
-    const cacheKey = `${tenantId}:${getMailListCacheKey(opts as Record<string, unknown>)}`;
-    mailListCache.set(cacheKey, { data: result, at: Date.now() });
-  }
-
+  mailListCache.set(cacheKey, { data: result, at: Date.now() });
   return result;
 }
 
-async function getMailListFromQuery(
+function isFilteredLabelView(labelIds: string[] | undefined): boolean {
+  if (!labelIds || labelIds.length === 0) return false;
+  return labelIds.length > 1 || labelIds[0] !== INBOX_LABEL;
+}
+
+async function getMailListFromSearch(
   accountId: string,
   client: ReturnType<typeof corsair.withTenant>,
-  opts: { pageToken?: string | null; q?: string },
-  pageSize: number,
+  q: string,
+  page: number,
   labelIds: string[],
 ): Promise<MailListResponse> {
+  // Search empty response: pager is hidden (count=null, totalPages=null).
+  const searchEmpty = (): MailListResponse => ({
+    items: [],
+    count: null,
+    page,
+    totalPages: null,
+    hasMore: false,
+    hasPrev: page > 1,
+    cacheState: "full",
+    coverage: 1,
+    source: "live",
+    degraded: false,
+  });
+
+  // Free-text search: no cached count. Always a Gmail round-trip for the
+  // page contents (TanStack Query is responsible for the per-id metadata
+  // cache that warms subsequent page loads).
   let apiResult: Record<string, unknown>;
   try {
     apiResult = (await client.gmail.api.messages.list({
       userId: "me",
-      maxResults: pageSize,
-      pageToken: opts.pageToken ?? undefined,
-      q: opts.q!,
+      maxResults: PAGE_SIZE,
+      ...(page > 1 ? { pageToken: undefined } : {}),
+      q,
       includeSpamTrash: true,
     })) as Record<string, unknown>;
   } catch (err) {
-    console.error(`[mail] getMailListFromQuery: Gmail API error for q="${opts.q}": ${describeError(err)}`);
-    return { items: [], nextPageToken: null, source: "live", totalCount: 0 };
+    console.error(`[mail] search error for q="${q}": ${describeError(err)}`);
+    return searchEmpty();
   }
 
   if (!apiResult || Object.keys(apiResult).length === 0) {
-    console.error(`[mail] getMailListFromQuery: empty response from Gmail API for q="${opts.q}"`);
-    return { items: [], nextPageToken: null, source: "live", totalCount: 0 };
+    return searchEmpty();
   }
 
   const messages = (apiResult.messages ?? []) as Array<{ id?: string }>;
@@ -441,12 +585,11 @@ async function getMailListFromQuery(
     .filter((id): id is string => !!id);
 
   if (ids.length === 0) {
-    return { items: [], nextPageToken: null, source: "live", totalCount: 0 };
+    return searchEmpty();
   }
 
   await enrichStubs(accountId, client, ids);
 
-  // Batch read all enriched rows in a single query (was: N+1)
   const existingRows = await client.gmail.db.messages.findManyByEntityIds(ids);
   const rowByEntityId = new Map<string, (typeof existingRows)[number]>();
   for (const row of existingRows) {
@@ -464,431 +607,86 @@ async function getMailListFromQuery(
 
   return {
     items,
-    nextPageToken: (apiResult.nextPageToken as string | null) ?? null,
+    count: null,
+    page,
+    totalPages: null,
+    hasMore: false,
+    hasPrev: page > 1,
+    cacheState: "full",
+    coverage: 1,
     source: "live",
-    totalCount: (apiResult.resultSizeEstimate as number) ?? 0,
+    degraded: false,
   };
 }
 
-async function getMailListFromCachePage(
+async function getMailListFromFilteredView(
   accountId: string,
   client: ReturnType<typeof corsair.withTenant>,
-  cacheTokenPage: number,
-  pageSize: number,
-  labelIds: string[],
-  isFilteredLabel: boolean,
+  view: { labelIds?: string[]; query?: string },
+  page: number,
 ): Promise<MailListResponse> {
-  const offset = cacheTokenPage * pageSize;
+  const offset = (page - 1) * PAGE_SIZE;
+  const labelIds = view.labelIds ?? [];
 
-  // ── Filtered labels: SQL-level filter using GIN index (no progressive loading) ──
-  if (isFilteredLabel) {
-    let rows = await listByLabel(accountId, labelIds, {
-      limit: pageSize,
-      offset,
-    });
-
-    if (rows.length === 0) {
-      return { items: [], nextPageToken: null, source: "cache", totalCount: 0 };
-    }
-
-    // Enrich any stubs in this page
-    const stubIds = rows
-      .filter((r) => !isRowEnriched(r))
-      .map((r) => r.data.id)
-      .filter((id): id is string => !!id);
-
-    if (stubIds.length > 0) {
-      await enrichStubs(accountId, client, stubIds);
-      rows = await listByLabel(accountId, labelIds, { limit: pageSize, offset });
-    }
-
-    const enriched = rows.filter(isRowEnriched);
-    const items = sortByReceivedDesc(rowsToListItems(enriched));
-    const totalCount = await countByLabel(accountId, labelIds);
-    const hasMore = totalCount > offset + pageSize;
-
-    return {
-      items,
-      nextPageToken: hasMore ? makeCachePageToken(cacheTokenPage + 1) : null,
-      source: "cache",
-      totalCount,
-    };
-  }
-
-  // ── INBOX / unfiltered: legacy path with corrected totalCount ──
-  const limit = (cacheTokenPage + 1) * pageSize;
-  let cachedAll = await listMessages(accountId, {
-    limit,
-    offset: 0,
+  let rows = await listByLabel(accountId, labelIds, {
+    limit: PAGE_SIZE,
+    offset,
   });
-  if (cachedAll.length === 0) {
-    return { items: [], nextPageToken: null, source: "cache", totalCount: 0 };
-  }
 
-  // Enrich any stubs
-  const stubIds = cachedAll
+  const stubIds = rows
     .filter((r) => !isRowEnriched(r))
-    .map((r) => (r.data as Record<string, unknown>).id as string)
+    .map((r) => r.data.id)
     .filter((id): id is string => !!id);
 
   if (stubIds.length > 0) {
     await enrichStubs(accountId, client, stubIds);
-    cachedAll = await listMessages(accountId, { limit, offset: 0 });
+    rows = await listByLabel(accountId, labelIds, { limit: PAGE_SIZE, offset });
   }
 
-  const enriched = cachedAll.filter(isRowEnriched);
-  const page = sortByReceivedDesc(rowsToListItems(enriched)).slice(
-    offset,
-    offset + pageSize,
-  );
+  const enriched = rows.filter(isRowEnriched);
+  const items = sortByReceivedDesc(rowsToListItems(enriched));
 
-  // Use DB totalCount (accurate for unfiltered — DB stores all messages for
-  // this account, regardless of label).
-  const totalCount = await client.gmail.db.messages.count();
+  const { count, degraded } = await resolveCount(accountId, client, view);
+  const dbCount = await countByLabel(accountId, labelIds);
+  const { cacheState, coverage } = computeCacheState(count, dbCount);
+  const { page: clampedPage, totalPages, hasMore, hasPrev } =
+    buildPagination(page, count);
 
-  const hasMore = enriched.length > offset + pageSize;
   return {
-    items: page,
-    nextPageToken: hasMore ? makeCachePageToken(cacheTokenPage + 1) : null,
+    items,
+    count,
+    page: clampedPage,
+    totalPages,
+    hasMore,
+    hasPrev,
+    cacheState,
+    coverage,
     source: "cache",
-    totalCount,
+    degraded,
   };
 }
 
-async function getMailListFromNormal(
+async function getMailListFromInbox(
   accountId: string,
   client: ReturnType<typeof corsair.withTenant>,
-  opts: { pageIndex?: number; pageToken?: string | null; force?: boolean; q?: string; deferSync?: boolean },
-  pageSize: number,
-  labelIds: string[],
-  hasGmailToken: boolean,
-  isFilteredLabel: boolean,
+  view: { labelIds?: string[]; query?: string },
+  page: number,
+  pageToken: string | null,
 ): Promise<MailListResponse> {
-  const pageIndex = Math.max(0, Math.floor(opts.pageIndex ?? 0));
-  const offset = pageIndex * pageSize;
-  const totalNeeded = offset + pageSize;
+  const offset = (page - 1) * PAGE_SIZE;
 
-  // ── Page 0 ────────────────────────────────────────────────────────
-  if (pageIndex === 0) {
-    // ── FORCE: bypass cache, always sync from Gmail ──
-    if (opts.force) {
-      console.log(`[mail] Page 0: force=true, syncing from Gmail`);
-      invalidateMailListCache();
-      const t0 = Date.now();
-      const { nextPageToken, resultSizeEstimate } = await syncLabelFromGmail(
-        accountId, client, totalNeeded, labelIds, opts.q,
-      );
-      let nextToken = nextPageToken;
-      if (!nextToken && !isFilteredLabel) {
-        const total =
-          resultSizeEstimate != null && resultSizeEstimate > 0
-            ? resultSizeEstimate
-            : await client.gmail.db.messages.count();
-        if (total > (pageIndex + 1) * pageSize) {
-          nextToken = makeCachePageToken(pageIndex + 1);
-        }
-      }
-      console.log(`[mail] Page 0 force-sync done in ${Date.now() - t0}ms`);
-      return buildPageFromDB(
-        accountId, client,
-        offset, pageSize, totalNeeded,
-        isFilteredLabel, labelIds, nextToken, "live", resultSizeEstimate,
-      );
-    }
-
-    // ── FAST PATH: try cache first ──
-    // For unfiltered INBOX: read first pageSize rows.
-    // For filtered labels: oversample by FILTERED_LABEL_CACHE_FETCH_MULTIPLIER
-    //   (capped) so we can find label-matching items beyond the first page.
-    const cacheFetchLimit = isFilteredLabel
-      ? Math.min(pageSize * FILTERED_LABEL_CACHE_FETCH_MULTIPLIER, FILTERED_LABEL_CACHE_FETCH_CAP)
-      : pageSize;
-
-    const cachedAll = await listMessages(accountId, {
-      limit: cacheFetchLimit,
-      offset: 0,
-    });
-
-    const cachedFiltered = isFilteredLabel
-      ? filterByLabel(cachedAll, labelIds)
-      : cachedAll;
-    const enrichedCount = cachedFiltered.filter(isRowEnriched).length;
-
-    if (enrichedCount >= pageSize) {
-      console.log(
-        `[mail] Page 0: cache hit (${enrichedCount} enriched / ${pageSize} needed, skipping Gmail sync)`,
-      );
-      // Pass null nextToken — buildPageFromDB will emit cache:N only when
-      // it actually finds more rows than the current page.
-      return buildPageFromDB(
-        accountId, client,
-        0, pageSize, pageSize,
-        isFilteredLabel, labelIds,
-        null, "cache", null,
-      );
-    }
-
-    if (opts.deferSync) {
-      console.log(
-        `[mail] Page 0: deferSync=true (${enrichedCount}/${pageSize} enriched), returning cache immediately + background sync`,
-      );
-      void backgroundSync(accountId, client, labelIds, pageSize * 2, opts.q);
-      const enriched = cachedFiltered.filter(isRowEnriched);
-      const totalCount = isFilteredLabel
-        ? await countByLabel(accountId, labelIds)
-        : await client.gmail.db.messages.count();
-      return {
-        items: sortByReceivedDesc(rowsToListItems(enriched)).slice(0, pageSize),
-        nextPageToken: null,
-        source: "cache",
-        totalCount,
-      };
-    }
-
-    // ── Background sync option (Phase 8): for INBOX only ──
-    // If we have SOME data but not enough, return what we have and sync
-    // in the background. Trade-off: user sees partial list immediately,
-    // list grows as sync completes. Disabled for filtered/search.
-    if (
-      enrichedCount > 0 &&
-      !isFilteredLabel &&
-      !opts.q
-    ) {
-      console.log(
-        `[mail] Page 0: partial cache (${enrichedCount}/${pageSize}), returning partial + background sync`,
-      );
-      const partial = await buildPageFromDB(
-        accountId, client,
-        0, enrichedCount, pageSize,
-        false, labelIds, null, "cache", null,
-      );
-      // Fire-and-forget background sync
-      void backgroundSync(accountId, client, labelIds, pageSize * 2, opts.q);
-      return partial;
-    }
-
-    // ── SLOW PATH: need to sync from Gmail ──
-    console.log(
-      `[mail] Page 0: cache miss (${enrichedCount}/${pageSize} enriched, syncing from Gmail)`,
-    );
-    const t0 = Date.now();
-    const { nextPageToken, resultSizeEstimate } = await syncLabelFromGmail(
-      accountId, client, totalNeeded, labelIds, opts.q,
-    );
-    let nextToken = nextPageToken;
-    if (!nextToken && !isFilteredLabel) {
-      const total =
-        resultSizeEstimate != null && resultSizeEstimate > 0
-          ? resultSizeEstimate
-          : await client.gmail.db.messages.count();
-      if (total > (pageIndex + 1) * pageSize) {
-        nextToken = makeCachePageToken(pageIndex + 1);
-      }
-    }
-    console.log(`[mail] Page 0 sync done in ${Date.now() - t0}ms`);
-    return buildPageFromDB(
-      accountId, client,
-      offset, pageSize, totalNeeded,
-      isFilteredLabel, labelIds, nextToken, "live", resultSizeEstimate,
-    );
+  // If the caller passed a Gmail-side pageToken (rare; URL-as-truth
+  // shouldn't reach here), advance from Gmail directly.
+  if (pageToken) {
+    return getMailListFromGmailToken(accountId, client, view, page, pageToken);
   }
 
-  // ── Page 1+: try cache first, enrich any stubs before returning ────
-  if (!hasGmailToken) {
-    // For filtered labels, use SQL-level pagination via the GIN index
-    if (isFilteredLabel) {
-      let rows = await listByLabel(accountId, labelIds, {
-        limit: pageSize,
-        offset,
-      });
-
-      if (rows.length > 0) {
-        const stubIds = rows
-          .filter((r) => !isRowEnriched(r))
-          .map((r) => r.data.id)
-          .filter((id): id is string => !!id);
-
-        if (stubIds.length > 0) {
-          await enrichStubs(accountId, client, stubIds);
-          rows = await listByLabel(accountId, labelIds, { limit: pageSize, offset });
-        }
-
-        const enriched = rows.filter(isRowEnriched);
-        const items = sortByReceivedDesc(rowsToListItems(enriched));
-        const totalCount = await countByLabel(accountId, labelIds);
-        const hasMore = totalCount > offset + pageSize;
-
-        return {
-          items,
-          nextPageToken: hasMore ? makeCachePageToken(pageIndex + 1) : null,
-          source: "cache",
-          totalCount,
-        };
-      }
-
-      return { items: [], nextPageToken: null, source: "cache", totalCount: 0 };
-    }
-
-    // For INBOX (unfiltered), legacy cache path
-    const cacheLoadLimit = totalNeeded;
-    const cachedAll = await listMessages(accountId, {
-      limit: cacheLoadLimit,
-      offset: 0,
-    });
-
-    if (cachedAll.length > 0) {
-      const stubIds = cachedAll
-        .filter((r) => !isRowEnriched(r))
-        .map((r) => (r.data as Record<string, unknown>).id as string)
-        .filter((id): id is string => !!id);
-
-      if (stubIds.length > 0) {
-        await enrichStubs(accountId, client, stubIds);
-        const refreshedAll = await listMessages(accountId, {
-          limit: cacheLoadLimit,
-          offset: 0,
-        });
-        const refreshedEnriched = refreshedAll.filter(isRowEnriched);
-        const page = sortByReceivedDesc(rowsToListItems(refreshedEnriched)).slice(
-          offset,
-          offset + pageSize,
-        );
-        const totalCount = await client.gmail.db.messages.count();
-        const hasMore = refreshedEnriched.length > (pageIndex + 1) * pageSize;
-        return {
-          items: page,
-          nextPageToken: hasMore ? makeCachePageToken(pageIndex + 1) : null,
-          source: "cache",
-          totalCount,
-        };
-      }
-
-      const enriched = cachedAll.filter(isRowEnriched);
-      const page = sortByReceivedDesc(rowsToListItems(enriched)).slice(
-        offset,
-        offset + pageSize,
-      );
-      const totalCount = await client.gmail.db.messages.count();
-      const hasMore = enriched.length > (pageIndex + 1) * pageSize;
-      return {
-        items: page,
-        nextPageToken: hasMore ? makeCachePageToken(pageIndex + 1) : null,
-        source: "cache",
-        totalCount,
-      };
-    }
-
-    return { items: [], nextPageToken: null, source: "cache", totalCount: 0 };
-  }
-
-  // ── Has Gmail token: fetch next page from API ────
-  const apiResult = await client.gmail.api.messages.list({
-    userId: "me",
-    maxResults: pageSize,
-    pageToken: opts.pageToken!,
-    ...(opts.q ? { q: opts.q, includeSpamTrash: true } : { labelIds }),
-  });
-  const nextToken = apiResult.nextPageToken ?? null;
-  const resultSizeEstimate = apiResult.resultSizeEstimate ?? null;
-
-  const ids = (apiResult.messages ?? [])
-    .map((m) => m.id)
-    .filter((id): id is string => !!id);
-
-  if (ids.length > 0) {
-    await enrichStubs(accountId, client, ids);
-  }
-
-  return buildPageFromDB(
-    accountId, client,
-    offset, pageSize, totalNeeded,
-    isFilteredLabel, labelIds, nextToken, "live", resultSizeEstimate,
-  );
-}
-
-/**
- * Fire-and-forget background sync for the partial-cache path (Phase 8).
- * Errors are logged but never propagated to the caller (which has already
- * returned partial data).
- */
-async function backgroundSync(
-  accountId: string,
-  client: ReturnType<typeof corsair.withTenant>,
-  labelIds: string[] | undefined,
-  limit: number,
-  q: string | undefined,
-): Promise<void> {
-  try {
-    invalidateMailListCache();
-    const result = await syncLabelFromGmail(accountId, client, limit, labelIds, q);
-    console.log(
-      `[mail] background sync done: nextPageToken=${result.nextPageToken ?? "null"} resultSizeEstimate=${result.resultSizeEstimate}`,
-    );
-    invalidateMailListCache();
-  } catch (err) {
-    console.log(`[mail] background sync failed: ${describeError(err)}`);
-  }
-}
-
-async function buildPageFromDB(
-  accountId: string,
-  client: ReturnType<typeof corsair.withTenant>,
-  offset: number,
-  pageSize: number,
-  totalNeeded: number,
-  isFilteredLabel: boolean,
-  labelIds: string[],
-  nextToken: string | null,
-  source: "cache" | "live",
-  resultSizeEstimate?: number | null,
-): Promise<MailListResponse> {
-  // ── Filtered labels: SQL-level filter using GIN index ──
-  if (isFilteredLabel) {
-    let rows = await listByLabel(accountId, labelIds, {
-      limit: pageSize,
-      offset,
-    });
-
-    // Self-healing: enrich stubs found in this page
-    const stubIds = rows
-      .filter((r) => !isRowEnriched(r))
-      .map((r) => r.data.id)
-      .filter((id): id is string => !!id);
-
-    if (stubIds.length > 0) {
-      await enrichStubs(accountId, client, stubIds);
-      console.log(
-        `[mail] buildPageFromDB (filtered): enriched ${stubIds.length} stubs, re-reading`,
-      );
-      rows = await listByLabel(accountId, labelIds, { limit: pageSize, offset });
-    }
-
-    const enriched = rows.filter(isRowEnriched);
-    const items = sortByReceivedDesc(rowsToListItems(enriched));
-    const totalCount = await countByLabel(accountId, labelIds);
-    const hasMore = totalCount > offset + pageSize || nextToken !== null;
-
-    console.log(
-      `[mail] buildPageFromDB (filtered): pageItems=${items.length} totalCount=${totalCount}`,
-    );
-    return {
-      items,
-      nextPageToken: hasMore
-        ? (nextToken ?? makeCachePageToken(Math.floor(offset / pageSize) + 1))
-        : null,
-      source,
-      totalCount,
-    };
-  }
-
-  // ── Unfiltered INBOX: legacy path with corrected totalCount ──
-  const fetchLimit = totalNeeded;
+  // Otherwise read from DB at the requested offset.
   let rows = await listMessages(accountId, {
-    limit: fetchLimit,
-    offset: 0,
+    limit: PAGE_SIZE,
+    offset,
   });
 
-  // Self-healing: if rows contain unenriched stubs, enrich them and re-read
   const stubIds = rows
     .filter((r) => !isRowEnriched(r))
     .map((r) => (r.data as Record<string, unknown>).id as string)
@@ -896,61 +694,84 @@ async function buildPageFromDB(
 
   if (stubIds.length > 0) {
     await enrichStubs(accountId, client, stubIds);
-    console.log(
-      `[mail] buildPageFromDB: enriched ${stubIds.length} stubs, re-reading`,
-    );
-    rows = await listMessages(accountId, {
-      limit: fetchLimit,
-      offset: 0,
-    });
+    rows = await listMessages(accountId, { limit: PAGE_SIZE, offset });
   }
 
   const enriched = rows.filter(isRowEnriched);
+  const items = sortByReceivedDesc(rowsToListItems(enriched));
 
-  console.log(`[mail] buildPageFromDB: totalRows=${rows.length} enriched=${enriched.length} fetchLimit=${fetchLimit} resultSizeEstimate=${resultSizeEstimate ?? "n/a"}`);
+  const { count, degraded } = await resolveCount(accountId, client, view);
+  // coverage = rows we have for this view / count. For unfiltered INBOX
+  // we count messages with the INBOX label (consistent with resolveCount's
+  // countByLabel fallback). Using client.gmail.db.messages.count() here
+  // would mix "all account messages" with "INBOX messages", breaking the
+  // coverage pill.
+  const dbCount = await countByLabel(accountId, [INBOX_LABEL]);
+  const { cacheState, coverage } = computeCacheState(count, dbCount);
+  const { page: clampedPage, totalPages, hasMore, hasPrev } =
+    buildPagination(page, count);
 
-  const page = sortByReceivedDesc(rowsToListItems(enriched)).slice(
-    offset,
-    offset + pageSize,
-  );
-
-  // totalCount priority:
-  //   1. resultSizeEstimate from Gmail API (most accurate, live count)
-  //   2. Label.messagesTotal from DB for single-label views (cached exact count)
-  //   3. DB total count
-  let totalCount: number;
-  if (resultSizeEstimate != null && resultSizeEstimate > 0) {
-    totalCount = resultSizeEstimate;
-  } else if (labelIds.length === 1) {
-    const cachedLabels = await client.gmail.db.labels.list();
-    const matchingLabel = cachedLabels.find(
-      (l) => (l.data as Record<string, unknown>).id === labelIds[0],
-    );
-    const labelTotal = matchingLabel
-      ? ((matchingLabel.data as Record<string, unknown>).messagesTotal as
-          | number
-          | undefined)
-      : undefined;
-    totalCount = labelTotal ?? (await client.gmail.db.messages.count());
-  } else {
-    totalCount = await client.gmail.db.messages.count();
-  }
-
-  // hasMore: true if either (a) the loaded page has more rows than fits,
-  // (b) we already have a Gmail-side nextToken, or (c) totalCount exceeds
-  // what was loaded into this page.
-  const pageHasMore = enriched.length > offset + pageSize;
-  const moreInDb = totalCount > page.length + offset;
-  const hasMore = pageHasMore || moreInDb || nextToken !== null;
-
-  console.log(`[mail] buildPageFromDB: returning ${page.length} items, totalCount=${totalCount}, hasMore=${hasMore}`);
   return {
-    items: page,
-    nextPageToken: hasMore ? (nextToken ?? makeCachePageToken(Math.floor(offset / pageSize) + 1)) : null,
-    source,
-    totalCount,
+    items,
+    count,
+    page: clampedPage,
+    totalPages,
+    hasMore,
+    hasPrev,
+    cacheState,
+    coverage,
+    source: "cache",
+    degraded,
   };
 }
+
+async function getMailListFromGmailToken(
+  accountId: string,
+  client: ReturnType<typeof corsair.withTenant>,
+  view: { labelIds?: string[]; query?: string },
+  page: number,
+  pageToken: string,
+): Promise<MailListResponse> {
+  const apiResult = (await client.gmail.api.messages.list({
+    userId: "me",
+    maxResults: PAGE_SIZE,
+    pageToken,
+    labelIds: view.labelIds ?? [INBOX_LABEL],
+  })) as Record<string, unknown>;
+
+  const ids = ((apiResult.messages ?? []) as Array<{ id?: string }>)
+    .map((m) => m.id)
+    .filter((id: unknown): id is string => typeof id === "string");
+
+  if (ids.length > 0) {
+    await enrichStubs(accountId, client, ids);
+  }
+
+  const rows = await client.gmail.db.messages.findManyByEntityIds(ids);
+  const enriched = rows.filter(isRowEnriched);
+  const items = sortByReceivedDesc(rowsToListItems(enriched));
+
+  const { count, degraded } = await resolveCount(accountId, client, view);
+  const dbCount = await countByLabel(accountId, [INBOX_LABEL]);
+  const { cacheState, coverage } = computeCacheState(count, dbCount);
+  const { page: clampedPage, totalPages, hasMore, hasPrev } =
+    buildPagination(page, count);
+
+  return {
+    items,
+    count,
+    page: clampedPage,
+    totalPages,
+    hasMore,
+    hasPrev,
+    cacheState,
+    coverage,
+    source: "live",
+    degraded,
+  };
+}
+
+// ─── Single-message reads (unchanged from previous commit) ──────────────
 
 export async function getMessage(
   id: string,
@@ -966,8 +787,6 @@ export async function getMessage(
   if (!opts.force) {
     const cached = await client.gmail.db.messages.findByEntityId(id);
     if (cached?.data?.payload) {
-      // Verify the cached payload actually has body data (not just metadata headers).
-      // Messages enriched with format:"metadata" have payload.headers but no body.
       const hasBody = cached.data.body
         || cached.data.payload.body?.data
         || cached.data.payload.parts?.some(
@@ -982,7 +801,6 @@ export async function getMessage(
     }
   }
 
-  // Bypass SDK auto-persist: raw fetch + native upsert (1 query each).
   const full = await fetchAndPersistFullBody(accountId, client, id);
 
   return { message: full, source: "live" };
@@ -1009,24 +827,92 @@ export async function prefetchFullBody(
   }
 }
 
+// ─── Refresh: user-initiated sync ────────────────────────────────────────
+
 export async function refreshInbox(): Promise<{ synced: number }> {
   const ctx = await getClient();
   if (!ctx) return { synced: 0 };
-  // refreshInbox is an explicit user-initiated sync — always bypass cache.
-  invalidateMailListCache();
+  const { tenantId, accountId, client } = ctx;
+
+  invalidateMailListCacheForTenant(tenantId);
+
   const inboxDef = MAIL_LABELS.find((l) => l.id === "INBOX");
+  let labelIds: string[] | undefined;
+  let viewQuery: string | undefined;
   if (inboxDef?.gmailQuery) {
-    await syncLabelFromGmail(ctx.accountId, ctx.client, DEFAULT_PAGE_SIZE, undefined, inboxDef.gmailQuery);
+    viewQuery = inboxDef.gmailQuery;
+    labelIds = undefined;
   } else {
-    await syncLabelFromGmail(ctx.accountId, ctx.client, DEFAULT_PAGE_SIZE, [INBOX_LABEL]);
+    labelIds = [INBOX_LABEL];
   }
-  invalidateMailListCache();
-  const rows = await listMessages(ctx.accountId, {
-    limit: DEFAULT_PAGE_SIZE,
-    offset: 0,
-  });
-  return { synced: rows.length };
+
+  // Phase 1: sync message IDs and warm the cache.
+  const syncResult = await syncLabelFromGmail(
+    accountId, client, PAGE_SIZE, labelIds, viewQuery,
+  );
+
+  // Phase 2: refresh label.messagesTotal for every label so the next
+  // resolveCount() reads the fresh count. Without this, the count would
+  // only update when the sidebar's useMailLabels re-runs.
+  try {
+    await client.gmail.api.labels.list({});
+  } catch (err) {
+    console.log(`[mail] refreshInbox: labels.list failed: ${describeError(err)}`);
+  }
+
+  invalidateMailListCacheForTenant(tenantId);
+
+  return { synced: syncResult.fetched };
 }
+
+async function syncLabelFromGmail(
+  accountId: string,
+  client: ReturnType<typeof corsair.withTenant>,
+  limit: number,
+  labelIds?: string[],
+  q?: string,
+): Promise<{ nextPageToken: string | null; resultSizeEstimate: number | null; fetched: number }> {
+  let listResult: Record<string, unknown>;
+  try {
+    listResult = (await client.gmail.api.messages.list({
+      userId: "me",
+      maxResults: limit,
+      ...(labelIds?.length ? { labelIds } : {}),
+      ...(q ? { q, includeSpamTrash: true } : {}),
+    })) as Record<string, unknown>;
+  } catch (err) {
+    console.error(`[mail] syncLabelFromGmail: Gmail API error: ${describeError(err)}`);
+    return { nextPageToken: null, resultSizeEstimate: null, fetched: 0 };
+  }
+
+  if (!listResult || Object.keys(listResult).length === 0) {
+    console.error(`[mail] syncLabelFromGmail: empty response from Gmail API`);
+    return { nextPageToken: null, resultSizeEstimate: null, fetched: 0 };
+  }
+
+  const messages = (listResult.messages ?? []) as Array<{ id?: string }>;
+  const ids = messages
+    .map((m) => m.id)
+    .filter((id): id is string => !!id);
+
+  const resultSizeEstimate =
+    (listResult.resultSizeEstimate as number | null) ?? null;
+
+  if (ids.length === 0) {
+    return { nextPageToken: null, resultSizeEstimate, fetched: 0 };
+  }
+
+  await enrichStubs(accountId, client, ids);
+
+  return {
+    nextPageToken:
+      ids.length >= limit ? ((listResult.nextPageToken as string | null) ?? null) : null,
+    resultSizeEstimate,
+    fetched: ids.length,
+  };
+}
+
+// ─── Profile ──────────────────────────────────────────────────────────────
 
 export async function markAsRead(
   ids: string[],
@@ -1034,8 +920,8 @@ export async function markAsRead(
   const ctx = await getClient();
   if (!ctx || ids.length === 0) return { marked: 0 };
 
-  const { client } = ctx;
-  invalidateMailListCache();
+  const { client, tenantId } = ctx;
+  invalidateMailListCacheForTenant(tenantId);
   await client.gmail.api.messages.batchModify({
     ids,
     removeLabelIds: ["UNREAD"],
@@ -1092,7 +978,6 @@ export async function getProfile(): Promise<MailProfile | null> {
 
   const parsed = GetProfileApiResponseSchema.parse(raw);
 
-  // Fetch user name and picture from session
   let name = "";
   let picture = "";
   try {
@@ -1118,7 +1003,7 @@ export async function getProfile(): Promise<MailProfile | null> {
 }
 
 export async function getMailPageData(
-  opts: { force?: boolean; view?: string } = {},
+  opts: { force?: boolean; view?: string; page?: number } = {},
 ): Promise<MailPageData | null> {
   const tenantId = await getSessionTenantId();
   if (!tenantId) return null;
@@ -1130,12 +1015,12 @@ export async function getMailPageData(
   }
 
   const view = opts.view ?? "INBOX";
+  const page = Math.max(1, Math.floor(opts.page ?? 1));
 
   const labelDef = MAIL_LABELS.find((l) => l.id === view);
   let labelIds: string[] | undefined;
   let viewQuery: string | undefined;
   if (labelDef?.gmailQuery) {
-    // ARCHIVE and any future query-based views
     viewQuery = labelDef.gmailQuery;
     labelIds = undefined;
   } else if (labelDef?.gmailLabel) {
@@ -1147,16 +1032,10 @@ export async function getMailPageData(
         : undefined;
   }
 
-  // Use a smaller page size for SSR to reduce cold-start latency.
-  // The client can load more pages via pagination.
-  const SSR_PAGE_SIZE = 25;
-
+  // SSR uses the same PAGE_SIZE as the client. No more SSR_PAGE_SIZE.
   const [list, profile, labels] = await Promise.all([
     getMailList({
-      pageIndex: 0,
-      pageSize: SSR_PAGE_SIZE,
-      force: opts.force,
-      deferSync: !opts.force,
+      page,
       labelIds,
       q: viewQuery,
     }),
@@ -1167,15 +1046,15 @@ export async function getMailPageData(
   return { tenantId, gmailConnected: true, view, list, profile, labels };
 }
 
-// ─── Thread Actions ──────────────────────────────────────────────────────────
+// ─── Thread Actions (per-tenant cache invalidation) ──────────────────────
 //
-// Each mutation invalidates the mail-list response cache (Phase 9) so that
-// the next page load reflects the new state.
+// Every mutation invalidates the calling tenant's mail-list cache so the
+// next page load reflects the new state. Other tenants are untouched.
 
 export async function archiveThread(threadId: string): Promise<void> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCache();
+  invalidateMailListCacheForTenant(ctx.tenantId);
   await ctx.client.gmail.api.threads.modify({
     id: threadId,
     removeLabelIds: ["INBOX"],
@@ -1185,7 +1064,7 @@ export async function archiveThread(threadId: string): Promise<void> {
 export async function unarchiveThread(threadId: string): Promise<void> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCache();
+  invalidateMailListCacheForTenant(ctx.tenantId);
   await ctx.client.gmail.api.threads.modify({
     id: threadId,
     addLabelIds: ["INBOX"],
@@ -1195,21 +1074,21 @@ export async function unarchiveThread(threadId: string): Promise<void> {
 export async function trashThread(threadId: string): Promise<void> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCache();
+  invalidateMailListCacheForTenant(ctx.tenantId);
   await ctx.client.gmail.api.threads.trash({ id: threadId });
 }
 
 export async function untrashThread(threadId: string): Promise<void> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCache();
+  invalidateMailListCacheForTenant(ctx.tenantId);
   await ctx.client.gmail.api.threads.untrash({ id: threadId });
 }
 
 export async function starThread(threadId: string): Promise<void> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCache();
+  invalidateMailListCacheForTenant(ctx.tenantId);
   await ctx.client.gmail.api.threads.modify({
     id: threadId,
     addLabelIds: ["STARRED"],
@@ -1219,7 +1098,7 @@ export async function starThread(threadId: string): Promise<void> {
 export async function unstarThread(threadId: string): Promise<void> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCache();
+  invalidateMailListCacheForTenant(ctx.tenantId);
   await ctx.client.gmail.api.threads.modify({
     id: threadId,
     removeLabelIds: ["STARRED"],
@@ -1228,8 +1107,8 @@ export async function unstarThread(threadId: string): Promise<void> {
 
 export async function markAsUnread(ids: string[]): Promise<void> {
   const ctx = await getClient();
-  if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCache();
+  if (!ctx || ids.length === 0) return;
+  invalidateMailListCacheForTenant(ctx.tenantId);
   await ctx.client.gmail.api.messages.batchModify({
     ids,
     addLabelIds: ["UNREAD"],
@@ -1239,7 +1118,7 @@ export async function markAsUnread(ids: string[]): Promise<void> {
 export async function moveToSpam(threadId: string): Promise<void> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCache();
+  invalidateMailListCacheForTenant(ctx.tenantId);
   await ctx.client.gmail.api.threads.modify({
     id: threadId,
     addLabelIds: ["SPAM"],
@@ -1253,7 +1132,7 @@ export async function moveThreadToLabel(
 ): Promise<void> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCache();
+  invalidateMailListCacheForTenant(ctx.tenantId);
   await ctx.client.gmail.api.threads.modify({
     id: threadId,
     addLabelIds: [labelId],
@@ -1266,7 +1145,7 @@ export async function removeLabelFromThread(
 ): Promise<void> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCache();
+  invalidateMailListCacheForTenant(ctx.tenantId);
   await ctx.client.gmail.api.threads.modify({
     id: threadId,
     removeLabelIds: [labelId],
@@ -1276,11 +1155,11 @@ export async function removeLabelFromThread(
 export async function deleteThread(threadId: string): Promise<void> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCache();
+  invalidateMailListCacheForTenant(ctx.tenantId);
   await ctx.client.gmail.api.threads.delete({ id: threadId });
 }
 
-// ─── Send / Reply / Forward ──────────────────────────────────────────────────
+// ─── Send / Reply / Forward ────────────────────────────────────────────────
 
 import {
   buildEncodedMimeMessage,
@@ -1309,6 +1188,7 @@ export async function sendEmail(
 ): Promise<{ id: string; threadId: string }> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
+  invalidateMailListCacheForTenant(ctx.tenantId);
 
   const profile = await getProfile();
   const from = profile?.emailAddress;
@@ -1358,8 +1238,8 @@ export async function replyToMessage(
 ): Promise<{ id: string; threadId: string }> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
+  invalidateMailListCacheForTenant(ctx.tenantId);
 
-  // Fetch the original message to get headers
   const original = await ctx.client.gmail.api.messages.get({
     id: messageId,
     format: "metadata",
@@ -1379,12 +1259,10 @@ export async function replyToMessage(
   const originalReferences = getHeader("References");
   const threadId = (original as { threadId?: string }).threadId || "";
 
-  // Build recipient list
   const profile = await getProfile();
   const myEmail = profile?.emailAddress?.toLowerCase() || "";
   const replyTo: string[] = [];
 
-  // Always reply to the sender
   if (originalFrom) {
     const senderEmail = extractEmail(originalFrom).toLowerCase();
     if (senderEmail !== myEmail) {
@@ -1393,7 +1271,6 @@ export async function replyToMessage(
   }
 
   if (options.replyAll) {
-    // Add all To recipients (except self and original sender)
     if (originalTo) {
       for (const addr of originalTo.split(",")) {
         const email = extractEmail(addr).toLowerCase();
@@ -1402,7 +1279,6 @@ export async function replyToMessage(
         }
       }
     }
-    // Add CC recipients (except self)
     if (originalCc) {
       const ccRecipients: string[] = [];
       for (const addr of originalCc.split(",")) {
@@ -1412,7 +1288,6 @@ export async function replyToMessage(
         }
       }
       if (ccRecipients.length > 0) {
-        // Send with CC
         const subject = originalSubject.startsWith("Re:")
           ? originalSubject
           : `Re: ${originalSubject}`;
@@ -1435,7 +1310,6 @@ export async function replyToMessage(
     }
   }
 
-  // If no valid recipients, fall back to original sender
   if (replyTo.length === 0 && originalFrom) {
     replyTo.push(originalFrom);
   }
@@ -1466,8 +1340,8 @@ export async function forwardMessage(
 ): Promise<{ id: string; threadId: string }> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
+  invalidateMailListCacheForTenant(ctx.tenantId);
 
-  // Fetch the original message
   const original = await ctx.client.gmail.api.messages.get({
     id: messageId,
     format: "metadata",
@@ -1512,7 +1386,7 @@ export async function forwardMessage(
 
   return {
     id: (result as { id?: string }).id || "",
-    threadId: (result as { threadId?: string }).threadId || threadId,
+    threadId: (result as { threadId?: string }).threadId || threadId || "",
   };
 }
 
@@ -1582,7 +1456,7 @@ export async function clearMailCache(): Promise<{
 }> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCache();
+  invalidateMailListCacheForTenant(ctx.tenantId);
 
   const allMessages = await ctx.client.gmail.db.messages.list({ limit: 10000 });
   let deletedMessages = 0;
@@ -1616,15 +1490,16 @@ export async function createDraft(params: {
 }): Promise<{ id: string }> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-
+  const profile = await getProfile();
+  const from = profile?.emailAddress;
   const raw = buildEncodedMimeMessage({
+    from,
     to: params.to ? params.to.split(",").map((e) => e.trim()).filter(Boolean) : [],
     cc: params.cc ? params.cc.split(",").map((e) => e.trim()).filter(Boolean) : undefined,
     bcc: params.bcc ? params.bcc.split(",").map((e) => e.trim()).filter(Boolean) : undefined,
     subject: params.subject || "(No subject)",
     html: params.html || "",
   });
-
   const result = await ctx.client.gmail.api.drafts.create({
     draft: { message: { raw } },
   });
@@ -1643,15 +1518,16 @@ export async function updateDraft(
 ): Promise<{ id: string }> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-
+  const profile = await getProfile();
+  const from = profile?.emailAddress;
   const raw = buildEncodedMimeMessage({
+    from,
     to: params.to ? params.to.split(",").map((e) => e.trim()).filter(Boolean) : [],
     cc: params.cc ? params.cc.split(",").map((e) => e.trim()).filter(Boolean) : undefined,
     bcc: params.bcc ? params.bcc.split(",").map((e) => e.trim()).filter(Boolean) : undefined,
     subject: params.subject || "(No subject)",
     html: params.html || "",
   });
-
   const result = await ctx.client.gmail.api.drafts.update({
     id: draftId,
     draft: { message: { raw } },
@@ -1662,7 +1538,6 @@ export async function updateDraft(
 export async function deleteDraft(draftId: string): Promise<{ ok: boolean }> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-
   await ctx.client.gmail.api.drafts.delete({ id: draftId });
   return { ok: true };
 }

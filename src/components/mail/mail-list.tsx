@@ -133,6 +133,8 @@ function MailListRow({
   );
 }
 
+export type CacheState = "full" | "partial" | "empty";
+
 export function MailList({
   items,
   selectedId,
@@ -140,6 +142,14 @@ export function MailList({
   onOpen,
   page,
   totalPages,
+  hasMore,
+  hasPrev,
+  pageSize,
+  count,
+  cacheState,
+  coverage,
+  degraded,
+  source,
   onPageChange,
   loading,
   error,
@@ -153,7 +163,15 @@ export function MailList({
   onSelect: (id: string) => void;
   onOpen?: (id: string) => void;
   page: number;
-  totalPages: number;
+  totalPages: number | null;
+  hasMore: boolean;
+  hasPrev: boolean;
+  pageSize: number;
+  count: number | null;
+  cacheState: CacheState;
+  coverage: number;
+  degraded: boolean;
+  source: "cache" | "live" | "syncing";
   onPageChange: (page: number) => void;
   loading: boolean;
   error: string | null;
@@ -299,13 +317,22 @@ export function MailList({
         })}
       </div>
 
-      {totalPages > 1 ? (
+      {/*
+        Pager only renders when we know the total. For free-text search
+        (totalPages === null), the pager is hidden and the list header
+        shows the "Showing the first N" text instead.
+
+        Page numbers come from the server's response — the client never
+        derives them. hasMore/hasPrev are the source of truth for the
+        Prev/Next enabled state.
+      */}
+      {totalPages !== null && totalPages > 1 ? (
         <div className="border-border flex items-center justify-between border-t px-4 py-2">
           <Button
             type="button"
             variant="outline"
             size="sm"
-            disabled={page <= 0 || loading}
+            disabled={!hasPrev || loading}
             onClick={() => onPageChange(page - 1)}
           >
             Prev
@@ -314,13 +341,13 @@ export function MailList({
             {Array.from({ length: Math.min(totalPages, 7) }, (_, i) => {
               let pageNum: number;
               if (totalPages <= 7) {
-                pageNum = i;
+                pageNum = i + 1;
               } else if (page < 3) {
-                pageNum = i;
+                pageNum = i + 1;
               } else if (page > totalPages - 4) {
-                pageNum = totalPages - 7 + i;
+                pageNum = totalPages - 7 + i + 1;
               } else {
-                pageNum = page - 3 + i;
+                pageNum = page - 3 + i + 1;
               }
               return (
                 <Button
@@ -332,7 +359,7 @@ export function MailList({
                   disabled={loading}
                   onClick={() => onPageChange(pageNum)}
                 >
-                  {pageNum + 1}
+                  {pageNum}
                 </Button>
               );
             })}
@@ -341,11 +368,34 @@ export function MailList({
             type="button"
             variant="outline"
             size="sm"
-            disabled={page >= totalPages - 1 || loading}
+            disabled={!hasMore || loading}
             onClick={() => onPageChange(page + 1)}
           >
             Next
           </Button>
+        </div>
+      ) : null}
+
+      {/*
+        Syncing / degraded pill — appears between the list and the pager
+        when the cache is still filling or when the count fell back to a
+        less-accurate source. Search results (count === null) skip this.
+      */}
+      {count !== null && (cacheState !== "full" || degraded) ? (
+        <div className="border-border text-muted-foreground border-t px-4 py-1.5 text-[0.625rem]">
+          {cacheState === "empty"
+            ? "No cache yet — click Refresh to sync."
+            : cacheState === "partial"
+              ? `Syncing ${Math.floor(coverage * count)}/${count}…`
+              : null}
+          {degraded ? " · count may be stale" : null}
+        </div>
+      ) : null}
+
+      {/* Search header: pager is hidden, show the "first N" line. */}
+      {searchQuery && count === null && items.length > 0 ? (
+        <div className="border-border text-muted-foreground border-t px-4 py-1.5 text-[0.625rem]">
+          Showing the first {items.length} of many — refine your search to narrow results.
         </div>
       ) : null}
 

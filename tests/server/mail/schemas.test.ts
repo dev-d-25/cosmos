@@ -10,6 +10,7 @@ import {
   MailMessageQuerySchema,
   MailProfileSchema,
   MailThreadsQuerySchema,
+  PAGE_SIZE,
 } from "@/server/mail/schemas";
 
 /**
@@ -19,6 +20,12 @@ import {
  * removed; do not resurrect it.
  */
 describe("Mail schemas (live)", () => {
+  describe("PAGE_SIZE", () => {
+    it("is exported as 25 (the single page size constant for SSR, client, schema, cache key)", () => {
+      expect(PAGE_SIZE).toBe(25);
+    });
+  });
+
   describe("MailAttachmentSchema", () => {
     it("accepts a valid attachment", () => {
       const input = {
@@ -205,42 +212,191 @@ describe("Mail schemas (live)", () => {
     });
   });
 
-  describe("MailListResponseSchema", () => {
-    it("accepts valid response with items", () => {
+  describe("MailListResponseSchema (v2 contract)", () => {
+    it("accepts a valid response with items, count, and pagination fields", () => {
       const input = {
         items: [],
-        nextPageToken: null,
-        source: "live",
-        totalCount: 0,
+        count: 0,
+        page: 1,
+        totalPages: 1,
+        hasMore: false,
+        hasPrev: false,
+        cacheState: "empty",
+        coverage: 0,
+        source: "cache",
+        degraded: false,
       };
       const result = MailListResponseSchema.parse(input);
-      expect(result.source).toBe("live");
+      expect(result.source).toBe("cache");
+      expect(result.cacheState).toBe("empty");
+    });
+
+    it("accepts null count for free-text search (no exact count available)", () => {
+      const input = {
+        items: [],
+        count: null,
+        page: 1,
+        totalPages: null,
+        hasMore: false,
+        hasPrev: false,
+        cacheState: "full",
+        coverage: 1,
+        source: "live",
+        degraded: false,
+      };
+      const result = MailListResponseSchema.parse(input);
+      expect(result.count).toBeNull();
+      expect(result.totalPages).toBeNull();
+    });
+
+    it("rejects negative count", () => {
+      const result = MailListResponseSchema.safeParse({
+        items: [],
+        count: -1,
+        page: 1,
+        totalPages: 1,
+        hasMore: false,
+        hasPrev: false,
+        cacheState: "full",
+        coverage: 1,
+        source: "cache",
+        degraded: false,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("rejects coverage outside [0, 1]", () => {
+      const tooHigh = MailListResponseSchema.safeParse({
+        items: [],
+        count: 10,
+        page: 1,
+        totalPages: 1,
+        hasMore: false,
+        hasPrev: false,
+        cacheState: "full",
+        coverage: 1.5,
+        source: "cache",
+        degraded: false,
+      });
+      expect(tooHigh.success).toBe(false);
+
+      const tooLow = MailListResponseSchema.safeParse({
+        items: [],
+        count: 10,
+        page: 1,
+        totalPages: 1,
+        hasMore: false,
+        hasPrev: false,
+        cacheState: "full",
+        coverage: -0.1,
+        source: "cache",
+        degraded: false,
+      });
+      expect(tooLow.success).toBe(false);
+    });
+
+    it("rejects invalid cacheState", () => {
+      const result = MailListResponseSchema.safeParse({
+        items: [],
+        count: 0,
+        page: 1,
+        totalPages: 1,
+        hasMore: false,
+        hasPrev: false,
+        cacheState: "loading",
+        coverage: 0,
+        source: "cache",
+        degraded: false,
+      });
+      expect(result.success).toBe(false);
     });
 
     it("rejects invalid source", () => {
       const result = MailListResponseSchema.safeParse({
         items: [],
-        nextPageToken: null,
-        source: "invalid",
-        totalCount: 0,
+        count: 0,
+        page: 1,
+        totalPages: 1,
+        hasMore: false,
+        hasPrev: false,
+        cacheState: "full",
+        coverage: 1,
+        source: "websocket",
+        degraded: false,
       });
       expect(result.success).toBe(false);
+    });
+
+    it("accepts 'syncing' as a source (partial cache + background fill)", () => {
+      const result = MailListResponseSchema.parse({
+        items: [],
+        count: 50,
+        page: 1,
+        totalPages: 2,
+        hasMore: true,
+        hasPrev: false,
+        cacheState: "partial",
+        coverage: 0.5,
+        source: "syncing",
+        degraded: false,
+      });
+      expect(result.source).toBe("syncing");
+    });
+
+    it("rejects page=0 (pages are 1-based)", () => {
+      const result = MailListResponseSchema.safeParse({
+        items: [],
+        count: 0,
+        page: 0,
+        totalPages: 1,
+        hasMore: false,
+        hasPrev: false,
+        cacheState: "full",
+        coverage: 1,
+        source: "cache",
+        degraded: false,
+      });
+      expect(result.success).toBe(false);
+    });
+
+    it("does not include legacy nextPageToken or totalCount fields", () => {
+      const result = MailListResponseSchema.safeParse({
+        items: [],
+        nextPageToken: "cache:1", // legacy field
+        totalCount: 0, // legacy field
+        count: 0,
+        page: 1,
+        totalPages: 1,
+        hasMore: false,
+        hasPrev: false,
+        cacheState: "full",
+        coverage: 1,
+        source: "cache",
+        degraded: false,
+      });
+      expect(result.success).toBe(true);
+      // z.object strips unknown keys by default
+      expect((result.data as { nextPageToken?: unknown }).nextPageToken).toBeUndefined();
+      expect((result.data as { totalCount?: unknown }).totalCount).toBeUndefined();
     });
   });
 
   /**
-   * Regression: the query schema used to be `z.enum(["true", "false"])`
-   * which threw 400 on `?refresh=` (empty). The fix relaxed it to
-   * `z.string().optional()` so any value passes through to the
-   * `query.refresh === "true"` check in the route.
+   * MailThreadsQuerySchema no longer accepts pageSize from the client —
+   * PAGE_SIZE is the single constant. Page is 1-based.
    */
   describe("MailThreadsQuerySchema", () => {
     it("parses default values when omitted", () => {
       const result = MailThreadsQuerySchema.parse({});
-      expect(result.page).toBe(0);
-      expect(result.pageSize).toBe(50);
+      expect(result.page).toBe(1);
       expect(result.token).toBeUndefined();
-      expect(result.refresh).toBeUndefined();
+      expect(result.labelIds).toBeUndefined();
+      expect(result.q).toBeUndefined();
+    });
+
+    it("rejects page=0 (1-based externally)", () => {
+      const result = MailThreadsQuerySchema.safeParse({ page: 0 });
+      expect(result.success).toBe(false);
     });
 
     it("rejects negative page", () => {
@@ -253,42 +409,22 @@ describe("Mail schemas (live)", () => {
       expect(result.success).toBe(false);
     });
 
-    it("rejects pageSize above max", () => {
-      const result = MailThreadsQuerySchema.safeParse({ pageSize: 500 });
-      expect(result.success).toBe(false);
+    it("does not include pageSize (it's a server constant now)", () => {
+      const result = MailThreadsQuerySchema.parse({});
+      expect((result as { pageSize?: unknown }).pageSize).toBeUndefined();
     });
 
-    it("rejects non-positive pageSize", () => {
-      const result = MailThreadsQuerySchema.safeParse({ pageSize: 0 });
-      expect(result.success).toBe(false);
+    it("accepts labelIds as a string array", () => {
+      const result = MailThreadsQuerySchema.parse({ labelIds: ["STARRED"] });
+      expect(result.labelIds).toEqual(["STARRED"]);
     });
 
-    it("accepts page, pageSize, token, refresh true", () => {
-      const result = MailThreadsQuerySchema.parse({
-        page: 2,
-        pageSize: 20,
-        token: "abc123",
-        refresh: "true",
-      });
-      expect(result.page).toBe(2);
-      expect(result.pageSize).toBe(20);
-      expect(result.token).toBe("abc123");
-      expect(result.refresh).toBe("true");
-    });
-
-    it("accepts any refresh string (relaxed from strict enum)", () => {
-      // The old strict-enum behavior rejected "yes", "", or any non-true/false
-      // value with 400. The fix accepts any string and the route does the
-      // boolean coercion with `query.refresh === "true"`.
-      expect(MailThreadsQuerySchema.parse({ refresh: "yes" }).refresh).toBe("yes");
-      expect(MailThreadsQuerySchema.parse({ refresh: "" }).refresh).toBe("");
+    it("accepts q (search)", () => {
+      const result = MailThreadsQuerySchema.parse({ q: "from:alice" });
+      expect(result.q).toBe("from:alice");
     });
   });
 
-  /**
-   * Regression: this is the schema that caused the "Invalid request" 400
-   * on click when the SDK validation pipeline threw. See notes above.
-   */
   describe("MailMessageQuerySchema", () => {
     it("returns undefined refresh when omitted", () => {
       const result = MailMessageQuerySchema.parse({});
@@ -301,14 +437,8 @@ describe("Mail schemas (live)", () => {
     });
 
     it("accepts empty refresh string without throwing", () => {
-      // Regression: the old `z.enum(["true","false"])` threw ZodError on "".
       const result = MailMessageQuerySchema.parse({ refresh: "" });
       expect(result.refresh).toBe("");
-    });
-
-    it("accepts arbitrary refresh string (no enum)", () => {
-      const result = MailMessageQuerySchema.parse({ refresh: "garbage" });
-      expect(result.refresh).toBe("garbage");
     });
   });
 

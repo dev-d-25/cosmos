@@ -1,33 +1,24 @@
 import { NextResponse } from "next/server";
 import { getMailList } from "@/server/mail";
-import {
-  MailThreadsQuerySchema,
-  MailListResponseSchema,
-} from "@/server/mail/schemas";
+import { MailListResponseSchema } from "@/server/mail/schemas";
 import { withMailAuth } from "@/lib/mail/with-mail-auth";
 
 export const GET = withMailAuth(async (request) => {
   const url = new URL(request.url);
   const rawPage = url.searchParams.get("page") ?? undefined;
-  const rawPageSize = url.searchParams.get("pageSize") ?? undefined;
-  const rawToken = url.searchParams.get("token") ?? undefined;
-  const rawRefresh = url.searchParams.get("refresh") ?? undefined;
   const rawLabelIds = url.searchParams.get("labelIds") ?? undefined;
   const labelIds = rawLabelIds ? rawLabelIds.split(",").filter(Boolean) : undefined;
   const rawQ = url.searchParams.get("q") ?? undefined;
 
-  const query = MailThreadsQuerySchema.parse({
-    page: rawPage,
-    pageSize: rawPageSize,
-    token: rawToken,
-    refresh: rawRefresh,
-  });
+  // page is 1-based in the URL. parseInt with a fallback to 1 if absent
+  // or non-numeric. The server clamps to [1, totalPages].
+  const parsedPage = rawPage ? Number(rawPage) : 1;
+  const page = Number.isFinite(parsedPage) && parsedPage >= 1
+    ? Math.floor(parsedPage)
+    : 1;
 
   const data = await getMailList({
-    pageIndex: query.page,
-    pageSize: query.pageSize,
-    pageToken: query.token ?? null,
-    force: query.refresh === "true",
+    page,
     labelIds,
     q: rawQ,
   });

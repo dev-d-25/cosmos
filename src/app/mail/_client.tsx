@@ -1,11 +1,7 @@
 "use client";
 
-import {
-  useCallback,
-  useEffect,
-  useState,
-} from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useCallback, useMemo } from "react";
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
 
 import {
   DropdownMenu,
@@ -33,6 +29,7 @@ import type {
   MailPageData,
   MailProfile,
 } from "@/server/mail/schemas";
+import { PAGE_SIZE } from "@/server/mail/schemas";
 import {
   useMailThreads,
   useMailMessage,
@@ -45,6 +42,27 @@ import { markAsReadLocally } from "@/lib/read-emails";
 import type { MailSyncedState as SyncedState } from "@/types/mail";
 import { getGmailParamsForView, MAIL_LABELS } from "@/lib/mail/labels";
 
+/**
+ * Parse a `?page` query value into a positive integer. Returns 1 for
+ * null/undefined/non-finite/non-positive input. Single source of truth
+ * for the page parser — same function on SSR and client.
+ */
+function parsePageParam(raw: string | null | undefined): number {
+  if (!raw) return 1;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 1) return 1;
+  return Math.floor(n);
+}
+
+/**
+ * Parse a `?label` query value into a label id. Defaults to INBOX.
+ */
+function parseLabelParam(
+  raw: string | null | undefined,
+  fallback: string,
+): string {
+  return raw && raw.length > 0 ? raw : fallback;
+}
 
 // ─── Main Interface ─────────────────────────────────────────────────────────
 
@@ -61,47 +79,35 @@ export function MailInterface({
 }) {
   const gmailConnected = initial.gmailConnected;
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  const activeLabel = searchParams.get("label") ?? initialLabel ?? "INBOX";
+  // ─── URL is the single source of truth ─────────────────────────────────
+  // We never mirror these into useState. Every URL change triggers a
+  // re-render via useSearchParams, TanStack Query refetches with the new
+  // params, and the pager math falls out of the response. No juggling.
+
+  const activeLabel = parseLabelParam(searchParams.get("label"), initialLabel);
   const labelDef = MAIL_LABELS.find((l) => l.id === activeLabel);
   const labelName = labelDef?.name ?? activeLabel;
 
-  // ─── Local UI state ────────────────────────────────────────────────────
-  const [selectedId, setSelectedId] = useState<string | null>(() => searchParams.get("id") ?? initialSelectedId ?? null);
-  const [searchQuery, setSearchQuery] = useState<string>("");
-  const [composeOpen, setComposeOpen] = useState(false);
-  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const selectedId = searchParams.get("id") ?? initialSelectedId ?? null;
+  const searchQuery = searchParams.get("q") ?? "";
+  const page = parsePageParam(searchParams.get("page"));
 
-  const gmailParams = searchQuery
-    ? { query: searchQuery }
-    : getGmailParamsForView(activeLabel);
+  const gmailParams = useMemo(
+    () =>
+      searchQuery
+        ? { query: searchQuery }
+        : getGmailParamsForView(activeLabel),
+    [activeLabel, searchQuery],
+  );
 
-  // ─── TanStack Query hooks ──────────────────────────────────────────────
-  const [pageIndex, setPageIndex] = useState(() => {
-    const urlPage = searchParams.get("page");
-    // URL is 1-based, pageIndex is 0-based
-    return urlPage ? Math.max(0, Number(urlPage) - 1) : (initialPage ?? 0);
-  });
-  const [pageTokens, setPageTokens] = useState<(string | undefined)[]>(() => {
-    const urlPage = searchParams.get("page");
-    const idx = urlPage ? Math.max(0, Number(urlPage) - 1) : (initialPage ?? 0);
-    return Array.from({ length: idx + 1 }, (_, i) => undefined);
-  });
-  const [pageError, setPageError] = useState<string | null>(null);
-
-  const currentPageToken = pageTokens[pageIndex];
-
-  // Reset pagination when search query or label changes
-  useEffect(() => {
-    setPageIndex(0);
-    setPageTokens([undefined]);
-  }, [searchQuery, activeLabel]);
+  const [composeOpen, setComposeOpen] = useStateShim(false);
+  const [shortcutsOpen, setShortcutsOpen] = useStateShim(false);
 
   const threadsQuery = useMailThreads({
-    page: pageIndex,
-    pageSize: 50,
-    token: currentPageToken,
+    page,
     labelIds: gmailParams.labelIds,
     q: gmailParams.query,
     initialData: initial.gmailConnected ? initial.list : undefined,
@@ -120,10 +126,36 @@ export function MailInterface({
 
   const messageQuery = useMailMessage(selectedId);
 
-  // ─── Ctrl+K to open search ────────────────────────────────────────────
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      // Don't trigger shortcuts when typing in inputs
+  // ─── URL writers (the only writer) ──────────────────────────────────────
+  //
+  // Every URL mutation goes through buildUrl(). router.replace is the only
+  // function that touches the URL. This eliminates the prior
+  // useState+history.replaceState race that produced stale state after
+  // back/forward navigation.
+
+  const buildUrl = useCallback(
+    (updates: Record<string, string | null>): string => {
+      const params = new URLSearchParams(searchParams.toString());
+      for (const [key, value] of Object.entries(updates)) {
+        if (value == null || value === "") params.delete(key);
+        else params.set(key, value);
+      }
+      const qs = params.toString();
+      return qs ? `${pathname}?${qs}` : pathname;
+    },
+    [pathname, searchParams],
+  );
+
+  const navigate = useCallback(
+    (updates: Record<string, string | null>) => {
+      router.replace(buildUrl(updates), { scroll: false });
+    },
+    [router, buildUrl],
+  );
+
+  // ─── Ctrl+K to open search ──────────────────────────────────────────────
+  const handleShortcut = useCallback(
+    (e: KeyboardEvent) => {
       const target = e.target as HTMLElement;
       if (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable) {
         return;
@@ -132,32 +164,31 @@ export function MailInterface({
         e.preventDefault();
         router.push("/search");
       }
-    };
-    window.addEventListener("keydown", handler);
-    return () => window.removeEventListener("keydown", handler);
-  }, [router]);
+    },
+    [router],
+  );
+  useGlobalKeydown(handleShortcut);
 
-  // ─── Derived state ─────────────────────────────────────────────────────
-  const items: MailListItem[] = (() => {
-    const raw = threadsQuery.data?.items ?? [];
+  // ─── Derived state (read straight off the response) ─────────────────────
+  const responseItems = threadsQuery.data?.items ?? [];
+  const items: MailListItem[] = useMemo(() => {
     const seen = new Set<string>();
-    return raw.filter((item) => {
+    return responseItems.filter((item) => {
       if (seen.has(item.id)) return false;
       seen.add(item.id);
       return true;
     });
-  })();
+  }, [responseItems]);
 
-  const hasMore = threadsQuery.data?.nextPageToken !== null && threadsQuery.data?.nextPageToken !== undefined;
-  const totalCount = threadsQuery.data?.totalCount ?? 0;
-  const pageSize = 50;
-  const calculatedPages = totalCount > 0 ? Math.ceil(totalCount / pageSize) : 1;
-  // When hasMore is true, we don't yet know the true final page count
-  // (e.g., when totalCount came from a partial cache read). Guarantee at
-  // least one page ahead of the current pageIndex so NEXT stays enabled.
-  const totalPages = hasMore
-    ? Math.max(calculatedPages, pageIndex + 2)
-    : Math.max(1, calculatedPages);
+  const count = threadsQuery.data?.count ?? null;
+  const totalPages = threadsQuery.data?.totalPages ?? null;
+  const hasMore = threadsQuery.data?.hasMore ?? false;
+  const hasPrev = threadsQuery.data?.hasPrev ?? false;
+  const pageFromResponse = threadsQuery.data?.page ?? page;
+  const cacheState = threadsQuery.data?.cacheState ?? "empty";
+  const coverage = threadsQuery.data?.coverage ?? 0;
+  const degraded = threadsQuery.data?.degraded ?? false;
+  const source = threadsQuery.data?.source ?? "cache";
 
   const labels: MailLabel[] = labelsQuery.data ?? [];
   const profile: MailProfile | null = profileQuery.data ?? null;
@@ -166,92 +197,51 @@ export function MailInterface({
     ? "Not connected"
     : threadsQuery.isLoading
       ? "Loading..."
-      : items.length === 0
+      : items.length === 0 && count === 0
         ? "No mail cached"
         : "Synced";
 
   const selectedListItem = items.find((i) => i.id === selectedId) ?? null;
 
-  // ─── Reset page when label changes ────────────────────────────────────
-  useEffect(() => {
-    setPageIndex(0);
-    setPageTokens([undefined]);
-    setSelectedId(null);
-  }, [activeLabel]);
+  // ─── Pager math falls out of the response ──────────────────────────────
+  // No client-side totalPages derivation. The server's response IS the
+  // math. When the URL changes, the query refetches, the new response
+  // lands, and the pager renders from it.
 
-  // ─── Auto-store next page tokens from query results ───────────────────
-  useEffect(() => {
-    const token = threadsQuery.data?.nextPageToken;
-    if (token) {
-      setPageTokens((prev) => {
-        if (prev[pageIndex + 1] === token) return prev;
-        const next = [...prev];
-        next[pageIndex + 1] = token;
-        return next;
-      });
-    }
-  }, [threadsQuery.data?.nextPageToken, pageIndex]);
+  const onSelect = useCallback(
+    (id: string) => {
+      markAsReadLocally(id);
+      navigate({ id });
+    },
+    [navigate],
+  );
 
-  // ─── Sync pageIndex and selectedId to URL ──────────────────────────────
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (pageIndex > 0) {
-      // URL is 1-based for human-friendly navigation
-      params.set("page", String(pageIndex + 1));
-    } else {
-      params.delete("page");
-    }
-    if (selectedId) {
-      params.set("id", selectedId);
-    } else {
-      params.delete("id");
-    }
-    // Use history.replaceState to avoid triggering SSR re-render
-    // (router.replace re-runs the server component unnecessarily)
-    window.history.replaceState(null, "", `?${params.toString()}`);
-  }, [pageIndex, selectedId]);
-
-  // ─── Callbacks ─────────────────────────────────────────────────────────
-  const onSelect = useCallback((id: string) => {
-    setSelectedId(id);
-    markAsReadLocally(id);
-  }, []);
-
-  const onOpen = useCallback((id: string) => {
-    setSelectedId(id);
-  }, []);
+  const onOpen = useCallback(
+    (id: string) => {
+      navigate({ id });
+    },
+    [navigate],
+  );
 
   const onPageChange = useCallback(
     (newPage: number) => {
-      if (newPage === pageIndex) return;
-      setPageError(null);
-      setPageIndex(newPage);
+      // 1-based. The server clamps.
+      navigate({ page: newPage > 1 ? String(newPage) : null });
     },
-    [pageIndex],
+    [navigate],
   );
 
   const onClose = useCallback(() => {
-    setSelectedId(null);
-  }, []);
+    navigate({ id: null });
+  }, [navigate]);
 
   const onRefresh = useCallback(() => {
     refreshMutation.mutate();
-    threadsQuery.refetch();
-    labelsQuery.refetch();
-  }, [refreshMutation, threadsQuery, labelsQuery]);
+  }, [refreshMutation]);
 
   const onClearCache = useCallback(() => {
-    clearCacheMutation.mutate(undefined, {
-      onSuccess: () => {
-        setSelectedId(null);
-        setPageIndex(0);
-        setPageTokens([undefined]);
-        threadsQuery.refetch();
-        labelsQuery.refetch();
-        profileQuery.refetch();
-      },
-    });
-  }, [clearCacheMutation, threadsQuery, labelsQuery, profileQuery]);
+    clearCacheMutation.mutate();
+  }, [clearCacheMutation]);
 
   const onMailAction = useCallback(
     async (action: string, threadId: string, extra?: Record<string, unknown>) => {
@@ -266,23 +256,38 @@ export function MailInterface({
           console.error(`[mail action] ${action} failed:`, err.error);
           return;
         }
-        // Optimistic: close viewer and refetch list for destructive actions
         if (["archive", "trash", "delete", "spam"].includes(action)) {
-          setSelectedId(null);
+          // Optimistic: close viewer. URL drops ?id.
+          navigate({ id: null });
         }
-        threadsQuery.refetch();
+        // Refetch threads so the action's effect on labels/count is
+        // reflected immediately.
+        await threadsQuery.refetch();
       } catch (err) {
         console.error(`[mail action] ${action} error:`, err);
       }
     },
-    [threadsQuery],
+    [navigate, threadsQuery],
   );
 
-  // ─── Keyboard shortcuts ────────────────────────────────────────────────
+  const setSearchQuery = useCallback(
+    (q: string) => {
+      // Search is mutually exclusive with label; q wins.
+      navigate(q ? { q, page: null, label: null } : { q: null, page: null });
+    },
+    [navigate],
+  );
+
+  // ─── Keyboard shortcuts ─────────────────────────────────────────────────
   useMailShortcuts({
     items,
     selectedId,
-    setSelectedId,
+    setSelectedId: (valueOrUpdater) => {
+      const nextId = typeof valueOrUpdater === "function"
+        ? valueOrUpdater(selectedId)
+        : valueOrUpdater;
+      navigate({ id: nextId });
+    },
     onOpen,
     onClose,
     onMailAction,
@@ -307,7 +312,12 @@ export function MailInterface({
       />
       <ResizablePanelGroup className="min-h-0 flex-1">
         <ResizablePanel defaultSize={16} minSize={12}>
-          <MailSidebar labels={labels} activeLabel={activeLabel} profile={profile} onCompose={() => setComposeOpen(true)} />
+          <MailSidebar
+            labels={labels}
+            activeLabel={activeLabel}
+            profile={profile}
+            onCompose={() => setComposeOpen(true)}
+          />
         </ResizablePanel>
         <ResizableHandle withHandle />
         <ResizablePanel defaultSize={30} minSize={20}>
@@ -322,17 +332,23 @@ export function MailInterface({
               selectedId={selectedId}
               onSelect={onSelect}
               onOpen={onOpen}
-              page={pageIndex}
+              page={pageFromResponse}
               totalPages={totalPages}
+              hasMore={hasMore}
+              hasPrev={hasPrev}
+              pageSize={PAGE_SIZE}
+              count={count}
+              cacheState={cacheState}
+              coverage={coverage}
+              degraded={degraded}
+              source={source}
               onPageChange={onPageChange}
               loading={threadsQuery.isFetching}
-              error={pageError}
+              error={null}
               isInitialLoading={threadsQuery.isLoading}
               labelName={labelName}
               searchQuery={searchQuery || undefined}
-              onClearSearch={() => {
-                setSearchQuery("");
-              }}
+              onClearSearch={() => setSearchQuery("")}
             />
           </div>
         </ResizablePanel>
@@ -360,4 +376,22 @@ export function MailInterface({
       />
     </div>
   );
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Local helpers: tiny wrappers around useState so this file is self-contained.
+// Inlined here rather than imported from a hook to keep the diff focused on
+// the URL-as-truth refactor.
+
+import { useEffect, useState } from "react";
+
+function useStateShim<T>(initial: T): [T, (v: T) => void] {
+  return useState<T>(initial);
+}
+
+function useGlobalKeydown(handler: (e: KeyboardEvent) => void) {
+  useEffect(() => {
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [handler]);
 }

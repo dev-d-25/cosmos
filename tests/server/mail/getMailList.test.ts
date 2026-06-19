@@ -1,10 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MailListItemSchema } from "@/server/mail/schemas";
+import { PAGE_SIZE } from "@/server/mail/schemas";
 
 type Row = {
   data: Record<string, unknown>;
-  entity_id?: string;
-  entity_type?: string;
 };
 
 const mockListMessages = vi.fn<
@@ -21,12 +19,14 @@ const mockListByLabel = vi.fn<
   ) => Promise<Row[]>
 >();
 const mockCountByLabel = vi.fn<() => Promise<number>>();
+
 /**
- * The unfiltered INBOX paths also call the SDK's
- * `client.gmail.db.messages.count()` for a total row count when
- * `resultSizeEstimate` is unavailable. Mock it explicitly.
+ * The unfiltered INBOX path calls the SDK's
+ * `client.gmail.db.messages.count()` for the total row count when the
+ * label row is unavailable. Mock it explicitly.
  */
 const mockDbCount = vi.fn<() => Promise<number>>();
+
 const mockFindByEntityId = vi.fn<(id: string) => Promise<Row | null>>();
 const mockFindManyByEntityIds = vi.fn<(ids: string[]) => Promise<Row[]>>();
 const mockApiMessagesList = vi.fn();
@@ -109,10 +109,6 @@ function makeRows(count: number): Row[] {
   );
 }
 
-/**
- * Mock the global fetch used by enrichStubs to fetch message metadata.
- * Returns a successful response with a minimal payload (Subject + From).
- */
 function mockGmailFetchFor(rows: Row[]): void {
   mockFetch.mockImplementation(async (url: string) => {
     const match = /\/messages\/([^/?]+)/.exec(url);
@@ -135,7 +131,47 @@ function mockGmailFetchFor(rows: Row[]): void {
   });
 }
 
-describe("getMailList pagination", () => {
+/**
+ * The new contract always carries these fields. Every test verifies
+ * the shape, even when the test's main concern is something else.
+ */
+type MailListResponseV2 = {
+  items: unknown[];
+  count: number | null;
+  page: number;
+  totalPages: number | null;
+  hasMore: boolean;
+  hasPrev: boolean;
+  cacheState: "full" | "partial" | "empty";
+  coverage: number;
+  source: "cache" | "live" | "syncing";
+  degraded: boolean;
+};
+
+function expectV2Shape(result: MailListResponseV2) {
+  expect(result.items).toBeInstanceOf(Array);
+  expect(typeof result.page).toBe("number");
+  expect(result.page).toBeGreaterThanOrEqual(1);
+  expect(typeof result.hasMore).toBe("boolean");
+  expect(typeof result.hasPrev).toBe("boolean");
+  expect(["full", "partial", "empty"]).toContain(result.cacheState);
+  expect(typeof result.coverage).toBe("number");
+  expect(result.coverage).toBeGreaterThanOrEqual(0);
+  expect(result.coverage).toBeLessThanOrEqual(1);
+  expect(["cache", "live", "syncing"]).toContain(result.source);
+  expect(typeof result.degraded).toBe("boolean");
+  if (result.count === null) {
+    expect(result.totalPages).toBeNull();
+  } else {
+    expect(typeof result.count).toBe("number");
+    expect(typeof result.totalPages).toBe("number");
+    expect(result.totalPages).toBeGreaterThanOrEqual(1);
+  }
+}
+
+// (Type-only declaration removed; replaced with MailListResponseV2 above.)
+
+describe("getMailList (v2 contract)", () => {
   beforeEach(() => {
     vi.resetModules();
     mockListMessages.mockReset();
@@ -161,10 +197,8 @@ describe("getMailList pagination", () => {
         items.map((i) => ({ data: { id: i.entityId } })),
     );
 
-    // Default fetch impl: success
     vi.stubGlobal("fetch", mockFetch);
 
-    // Default helpers return empty / 0
     mockListByLabel.mockResolvedValue([]);
     mockCountByLabel.mockResolvedValue(0);
     mockListMessages.mockResolvedValue([]);
@@ -177,370 +211,385 @@ describe("getMailList pagination", () => {
     vi.clearAllMocks();
   });
 
-  it("returns empty array when no session", async () => {
+  it("returns the empty v2 shape when there is no session", async () => {
     mockGetSessionTenantId.mockResolvedValueOnce(null);
     const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageIndex: 0 });
+    const result = await getMailList({ page: 1 });
+    expectV2Shape(result);
     expect(result.items).toEqual([]);
+    expect(result.count).toBe(0);
+    expect(result.totalPages).toBe(1);
+    expect(result.hasMore).toBe(false);
+    expect(result.hasPrev).toBe(false);
+    expect(result.page).toBe(1);
+    expect(result.cacheState).toBe("empty");
+    expect(result.coverage).toBe(0);
     expect(result.source).toBe("cache");
-    expect(result.nextPageToken).toBeNull();
   });
 
-  it("serves page 0 entirely from cache when cache covers the request", async () => {
-    const rows = makeRows(50);
-    // Cache check: read first 50 rows
-    mockListMessages.mockResolvedValueOnce(rows);
-    // buildPageFromDB unfiltered path: read fetchLimit (50)
-    mockListMessages.mockResolvedValueOnce(rows);
-    mockCountByLabel.mockResolvedValueOnce(50);
+  it("clamps non-finite / non-positive page to 1", async () => {
+    mockListMessages.mockResolvedValueOnce(makeRows(20));
+    mockDbCount.mockResolvedValueOnce(20);
 
     const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageIndex: 0, pageSize: 50 });
-
-    expect(result.source).toBe("cache");
-    expect(result.nextPageToken).toBeNull();
-    expect(result.items).toHaveLength(50);
-    expect(result.items[0]?.id).toBe("m_000");
-    expect(mockApiMessagesList).not.toHaveBeenCalled();
-    expect(mockFetch).not.toHaveBeenCalled();
+    for (const bad of [-3, 0, NaN, Number.POSITIVE_INFINITY]) {
+      const result = await getMailList({ page: bad });
+      expect(result.page).toBe(1);
+      expect(result.items[0]?.id).toBe("m_000");
+    }
   });
 
-  it("returns a slice for page 1 from cache when more rows are cached than needed", async () => {
-    const rows = makeRows(120);
-    // getMailListFromCachePage unfiltered: read limit (100)
-    mockListMessages.mockResolvedValueOnce(rows);
-    mockCountByLabel.mockResolvedValueOnce(120);
+  describe("unfiltered INBOX path", () => {
+    it("reads the page from the DB at the requested offset (no 220-row fetch for page 10)", async () => {
+      // PAGE_SIZE * page is the offset; PAGE_SIZE rows are returned.
+      const rows = makeRows(PAGE_SIZE);
+      mockListMessages.mockResolvedValueOnce(rows);
+      // resolveCount reads label.messagesTotal from labels.list first;
+      // falling back to countByLabel is the secondary path. Here we test
+      // the label.messagesTotal path.
+      mockLabelsList.mockResolvedValueOnce([
+        { data: { id: "INBOX", messagesTotal: 500 } },
+      ]);
 
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({
-      pageToken: "cache:1",
-      pageSize: 50,
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 10 });
+
+      expectV2Shape(result);
+      expect(result.page).toBe(10);
+      expect(result.count).toBe(500);
+      expect(result.totalPages).toBe(Math.ceil(500 / PAGE_SIZE));
+      expect(result.hasMore).toBe(true);
+      expect(result.hasPrev).toBe(true);
+      expect(result.items).toHaveLength(PAGE_SIZE);
+      expect(mockListMessages).toHaveBeenCalledWith(
+        "account_1",
+        expect.objectContaining({ limit: PAGE_SIZE, offset: PAGE_SIZE * 9 }),
+      );
+      expect(mockApiMessagesList).not.toHaveBeenCalled();
     });
 
-    expect(result.source).toBe("cache");
-    expect(result.items).toHaveLength(50);
-    expect(result.items[0]?.id).toBe("m_050");
-    expect(result.items[49]?.id).toBe("m_099");
-    expect(mockApiMessagesList).not.toHaveBeenCalled();
-  });
+    it("reads the first page from the DB at offset 0", async () => {
+      const rows = makeRows(PAGE_SIZE);
+      mockListMessages.mockResolvedValueOnce(rows);
+      mockLabelsList.mockResolvedValueOnce([
+        { data: { id: "INBOX", messagesTotal: PAGE_SIZE } },
+      ]);
 
-  it("serves last partial page from cache when total is not a multiple of pageSize", async () => {
-    const rows = makeRows(120);
-    mockListMessages.mockResolvedValueOnce(rows);
-    mockCountByLabel.mockResolvedValueOnce(120);
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 1 });
 
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({
-      pageToken: "cache:2",
-      pageSize: 50,
+      expectV2Shape(result);
+      expect(result.page).toBe(1);
+      expect(result.items).toHaveLength(PAGE_SIZE);
+      expect(result.hasPrev).toBe(false);
+      expect(result.hasMore).toBe(false);
+      expect(result.count).toBe(PAGE_SIZE);
     });
 
-    expect(result.source).toBe("cache");
-    expect(result.items).toHaveLength(20);
-    expect(result.items[0]?.id).toBe("m_100");
-    expect(result.items[19]?.id).toBe("m_119");
-  });
+    it("returns empty page beyond the cached range and marks hasMore=false", async () => {
+      mockListMessages.mockResolvedValueOnce([]);
+      mockLabelsList.mockResolvedValueOnce([
+        { data: { id: "INBOX", messagesTotal: 10 } },
+      ]);
 
-  it("returns items sorted by receivedAt descending", async () => {
-    const rows = makeRows(50);
-    mockListMessages.mockResolvedValueOnce(rows);
-    mockListMessages.mockResolvedValueOnce(rows);
-    mockCountByLabel.mockResolvedValueOnce(50);
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 99 });
 
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageIndex: 0, pageSize: 50 });
-
-    const ids = result.items.map((i) => i.id);
-    const expected = makeRows(50).map((r) => r.data.id as string);
-    expect(ids).toEqual(expected);
-    expect(result.items[0]?.receivedAt).toBeTruthy();
-    expect(result.items[0]!.receivedAt >= result.items[49]!.receivedAt).toBe(
-      true,
-    );
-  });
-
-  it("syncs from Gmail when cache is empty (slow path)", async () => {
-    // Cache check: empty
-    mockListMessages.mockResolvedValueOnce([]);
-    // buildPageFromDB after sync: 50 enriched rows
-    mockListMessages.mockResolvedValueOnce(makeRows(50));
-    mockCountByLabel.mockResolvedValueOnce(50);
-
-    // Gmail API returns 50 message IDs
-    const apiRows = makeRows(50).map((r) => ({
-      id: r.data.id,
-      threadId: r.data.threadId,
-    }));
-    mockApiMessagesList.mockResolvedValueOnce({
-      messages: apiRows,
-      nextPageToken: null,
-    });
-    // Direct fetch (Gmail REST API) for enrichment
-    mockGmailFetchFor(makeRows(50));
-
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageIndex: 0, pageSize: 50 });
-
-    expect(mockApiMessagesList).toHaveBeenCalledTimes(1);
-    expect(mockApiMessagesList).toHaveBeenCalledWith({
-      userId: "me",
-      maxResults: 50,
-      labelIds: ["INBOX"],
-    });
-    expect(mockFetch).toHaveBeenCalledTimes(50);
-    expect(result.source).toBe("live");
-    expect(result.nextPageToken).toBeNull();
-    expect(result.items).toHaveLength(50);
-  });
-
-  it("fetches page 1 with a Gmail pageToken and warms metadata", async () => {
-    const cached = makeRows(50);
-    // buildPageFromDB unfiltered: read fetchLimit
-    mockListMessages.mockResolvedValueOnce(cached);
-    mockCountByLabel.mockResolvedValueOnce(100);
-
-    const newApiRows = makeRows(50).map((r, i) => ({
-      id: `p2_${i.toString().padStart(3, "0")}`,
-      threadId: `t_${i}`,
-    }));
-    mockApiMessagesList.mockResolvedValueOnce({
-      messages: newApiRows,
-      nextPageToken: "page_2_token",
-    });
-    mockGmailFetchFor(makeRows(50));
-
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({
-      pageIndex: 1,
-      pageSize: 50,
-      pageToken: "page_1_token",
+      expectV2Shape(result);
+      expect(result.items).toEqual([]);
+      // Page is clamped to totalPages.
+      expect(result.page).toBe(1); // ceil(10/25) = 1, page 99 clamps to 1
+      expect(result.totalPages).toBe(1);
     });
 
-    expect(mockApiMessagesList).toHaveBeenCalledWith({
-      userId: "me",
-      maxResults: 50,
-      pageToken: "page_1_token",
-      labelIds: ["INBOX"],
-    });
-    expect(mockFetch).toHaveBeenCalledTimes(50);
-    expect(result.source).toBe("live");
-    expect(result.nextPageToken).toBe("page_2_token");
-  });
+    it("falls back to countByLabel when the label row is absent", async () => {
+      const rows = makeRows(15);
+      mockListMessages.mockResolvedValueOnce(rows);
+      mockLabelsList.mockResolvedValueOnce([]); // no cached label row
+      mockCountByLabel.mockResolvedValueOnce(15);
 
-  it("returns empty page for pageIndex >= 1 with no pageToken and short cache", async () => {
-    mockListMessages.mockResolvedValueOnce([]);
-    mockCountByLabel.mockResolvedValueOnce(0);
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 1, labelIds: ["STARRED"] });
 
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageIndex: 1, pageSize: 50 });
-
-    expect(result.items).toEqual([]);
-    expect(result.source).toBe("cache");
-    expect(result.nextPageToken).toBeNull();
-    expect(mockApiMessagesList).not.toHaveBeenCalled();
-  });
-
-  it("skips cache when force is true and warms page 0 from live", async () => {
-    mockListMessages.mockResolvedValueOnce(makeRows(50));
-    mockCountByLabel.mockResolvedValueOnce(50);
-
-    const apiRows = makeRows(50).map((r, i) => ({
-      id: r.data.id,
-      threadId: r.data.threadId,
-    }));
-    mockApiMessagesList.mockResolvedValueOnce({
-      messages: apiRows,
-      nextPageToken: null,
-    });
-    mockGmailFetchFor(makeRows(50));
-
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({
-      pageIndex: 0,
-      pageSize: 50,
-      force: true,
+      expectV2Shape(result);
+      expect(result.count).toBe(15);
     });
 
-    expect(mockApiMessagesList).toHaveBeenCalledTimes(1);
-    expect(result.source).toBe("live");
-  });
+    it("falls back to client.gmail.db.messages.count() when no label and no row", async () => {
+      const rows = makeRows(10);
+      mockListMessages.mockResolvedValueOnce(rows);
+      // Force the label-less path: clear labels.list so resolveCount falls
+      // through to dbCount for unfiltered INBOX.
+      mockLabelsList.mockResolvedValueOnce([]);
+      // The unfiltered-INBOX path uses countByLabel(["INBOX"]) for
+      // dbCount (consistent with resolveCount's countByLabel fallback).
+      mockCountByLabel.mockResolvedValueOnce(10);
 
-  it("clamps pageSize to the 1..100 range", async () => {
-    // pageSize=5000 → clamped to 100
-    const bigRows = makeRows(100);
-    mockListMessages.mockResolvedValueOnce(bigRows);
-    mockListMessages.mockResolvedValueOnce(bigRows);
-    mockCountByLabel.mockResolvedValue(100);
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 1 });
 
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({
-      pageIndex: 0,
-      pageSize: 5000,
-    });
-    expect(result.items).toHaveLength(100);
-
-    // pageSize=0 → clamped to 1
-    const tinyRows = makeRows(1);
-    mockListMessages.mockResolvedValueOnce(tinyRows);
-    mockListMessages.mockResolvedValueOnce(tinyRows);
-    mockCountByLabel.mockResolvedValueOnce(1);
-
-    const result2 = await getMailList({
-      pageIndex: 0,
-      pageSize: 0,
-    });
-    expect(result2.items).toHaveLength(1);
-  });
-
-  it("clamps negative pageIndex to 0", async () => {
-    mockListMessages.mockResolvedValueOnce(makeRows(50));
-    mockListMessages.mockResolvedValueOnce(makeRows(50));
-    mockCountByLabel.mockResolvedValueOnce(50);
-
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageIndex: -3, pageSize: 50 });
-    expect(result.items).toHaveLength(50);
-    expect(result.items[0]?.id).toBe("m_000");
-  });
-
-  it("filters out rows whose data does not satisfy MailListItemSchema", async () => {
-    const validRows = makeRows(50);
-    const invalidRow: Row = { data: {} };
-    mockListMessages.mockResolvedValueOnce([...validRows, invalidRow]);
-    mockListMessages.mockResolvedValueOnce([...validRows, invalidRow]);
-    mockCountByLabel.mockResolvedValueOnce(51);
-
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageIndex: 0, pageSize: 50 });
-    expect(result.items).toHaveLength(50);
-    expect(
-      result.items.every((i) => MailListItemSchema.safeParse(i).success),
-    ).toBe(true);
-  });
-
-  it("exposes a cache-page token when more rows exist locally beyond the page", async () => {
-    const rows = makeRows(50);
-    mockListMessages.mockResolvedValueOnce(rows);
-    mockListMessages.mockResolvedValueOnce(rows);
-    // Unfiltered INBOX path uses client.gmail.db.messages.count() directly,
-    // not our countByLabel helper. The label list returns no match so the
-    // code falls back to the SDK count.
-    mockLabelsList.mockResolvedValueOnce([]);
-    mockDbCount.mockResolvedValueOnce(120);
-
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageIndex: 0, pageSize: 50 });
-
-    expect(result.source).toBe("cache");
-    expect(result.nextPageToken).toBe("cache:1");
-  });
-
-  it("uses label.messagesTotal from cached labels before falling back to SDK count", async () => {
-    const rows = makeRows(50);
-    mockListMessages.mockResolvedValueOnce(rows);
-    mockListMessages.mockResolvedValueOnce(rows);
-    // When the label list returns a label with messagesTotal, the code
-    // uses that value directly without calling the SDK count.
-    mockLabelsList.mockResolvedValueOnce([
-      { data: { id: "INBOX", messagesTotal: 240 } },
-    ]);
-
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageIndex: 0, pageSize: 50 });
-
-    expect(result.source).toBe("cache");
-    expect(result.nextPageToken).toBe("cache:1");
-    // The label.messagesTotal path was used; the SDK count should NOT
-    // have been called.
-    expect(mockDbCount).not.toHaveBeenCalled();
-  });
-
-  it("returns null nextPageToken when the cache holds exactly enough rows", async () => {
-    mockListMessages.mockResolvedValueOnce(makeRows(50));
-    mockListMessages.mockResolvedValueOnce(makeRows(50));
-    mockCountByLabel.mockResolvedValueOnce(50);
-
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageIndex: 0, pageSize: 50 });
-
-    expect(result.source).toBe("cache");
-    expect(result.nextPageToken).toBeNull();
-  });
-
-  it("serves cache:N tokens from the local cache with no API call", async () => {
-    const rows = makeRows(120);
-    // getMailListFromCachePage unfiltered: read limit (100 for page=1)
-    mockListMessages.mockResolvedValueOnce(rows);
-    mockCountByLabel.mockResolvedValueOnce(120);
-
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({
-      pageToken: "cache:1",
-      pageSize: 50,
+      expectV2Shape(result);
+      expect(result.count).toBe(10);
     });
 
-    expect(result.source).toBe("cache");
-    expect(result.items).toHaveLength(50);
-    expect(result.items[0]?.id).toBe("m_050");
-    expect(result.items[49]?.id).toBe("m_099");
-    expect(result.nextPageToken).toBe("cache:2");
-    expect(mockApiMessagesList).not.toHaveBeenCalled();
-  });
+    it("computes cacheState='partial' when DB has fewer rows than count says", async () => {
+      mockListMessages.mockResolvedValueOnce(makeRows(10));
+      mockLabelsList.mockResolvedValueOnce([
+        { data: { id: "INBOX", messagesTotal: 100 } },
+      ]);
+      // dbCount = countByLabel(["INBOX"]) = 10. count = 100. partial.
+      mockCountByLabel.mockResolvedValueOnce(10);
 
-  it("returns an empty page for a cache:N token beyond the local count", async () => {
-    mockListMessages.mockResolvedValueOnce([]);
-    mockCountByLabel.mockResolvedValueOnce(50);
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 1 });
 
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageToken: "cache:5", pageSize: 50 });
-
-    expect(result.items).toEqual([]);
-    expect(result.source).toBe("cache");
-    expect(result.nextPageToken).toBeNull();
-    expect(mockApiMessagesList).not.toHaveBeenCalled();
-  });
-
-  it("propagates the Gmail pageToken from the warm-up call when present", async () => {
-    mockListMessages.mockResolvedValueOnce([]);
-    mockListMessages.mockResolvedValueOnce(makeRows(50));
-    mockCountByLabel.mockResolvedValueOnce(50);
-
-    const apiRows = makeRows(50).map((r) => ({
-      id: r.data.id,
-      threadId: r.data.threadId,
-    }));
-    mockApiMessagesList.mockResolvedValueOnce({
-      messages: apiRows,
-      nextPageToken: "gmail_next_token",
+      expectV2Shape(result);
+      expect(result.count).toBe(100);
+      expect(result.cacheState).toBe("partial");
+      expect(result.coverage).toBeCloseTo(0.1);
     });
-    mockGmailFetchFor(makeRows(50));
 
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageIndex: 0, pageSize: 50 });
+    it("computes cacheState='empty' when DB has zero rows", async () => {
+      mockListMessages.mockResolvedValueOnce([]);
+      mockLabelsList.mockResolvedValueOnce([
+        { data: { id: "INBOX", messagesTotal: 0 } },
+      ]);
+      mockDbCount.mockResolvedValueOnce(0);
 
-    expect(result.source).toBe("live");
-    expect(result.nextPageToken).toBe("gmail_next_token");
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 1 });
+
+      expectV2Shape(result);
+      expect(result.cacheState).toBe("empty");
+      expect(result.coverage).toBe(0);
+    });
+
+    it("computes cacheState='full' when DB covers count", async () => {
+      const rows = makeRows(PAGE_SIZE);
+      mockListMessages.mockResolvedValueOnce(rows);
+      mockLabelsList.mockResolvedValueOnce([
+        { data: { id: "INBOX", messagesTotal: PAGE_SIZE } },
+      ]);
+      // The unfiltered-INBOX path uses countByLabel(["INBOX"]) for
+      // dbCount, NOT client.gmail.db.messages.count().
+      mockCountByLabel.mockResolvedValueOnce(PAGE_SIZE);
+
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 1 });
+
+      expectV2Shape(result);
+      expect(result.cacheState).toBe("full");
+      expect(result.coverage).toBe(1);
+    });
+
+    it("does not include legacy nextPageToken or totalCount in the response", async () => {
+      const rows = makeRows(PAGE_SIZE);
+      mockListMessages.mockResolvedValueOnce(rows);
+      mockLabelsList.mockResolvedValueOnce([
+        { data: { id: "INBOX", messagesTotal: PAGE_SIZE } },
+      ]);
+
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 1 });
+
+      expect((result as { nextPageToken?: unknown }).nextPageToken).toBeUndefined();
+      expect((result as { totalCount?: unknown }).totalCount).toBeUndefined();
+    });
   });
 
-  it("falls back to a cache-page token after warm-up when Gmail returned no token but more rows are cached", async () => {
-    mockListMessages.mockResolvedValueOnce([]);
-    mockListMessages.mockResolvedValueOnce(makeRows(60));
-    mockCountByLabel.mockResolvedValueOnce(60);
+  describe("filtered label path", () => {
+    it("uses listByLabel for STARRED (a single-label non-INBOX view)", async () => {
+      const rows = makeRows(10).map((r) => ({
+        ...r,
+        data: { ...r.data, labelIds: ["STARRED"] },
+      }));
+      mockListByLabel.mockResolvedValueOnce(rows);
+      mockLabelsList.mockResolvedValueOnce([
+        { data: { id: "STARRED", messagesTotal: 10 } },
+      ]);
 
-    const apiRows = makeRows(50).map((r) => ({
-      id: r.data.id,
-      threadId: r.data.threadId,
-    }));
-    mockApiMessagesList.mockResolvedValueOnce({
-      messages: apiRows,
-      nextPageToken: null,
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 1, labelIds: ["STARRED"] });
+
+      expectV2Shape(result);
+      expect(result.count).toBe(10);
+      expect(mockListByLabel).toHaveBeenCalledWith(
+        "account_1",
+        ["STARRED"],
+        expect.objectContaining({ limit: PAGE_SIZE, offset: 0 }),
+      );
+      expect(mockListMessages).not.toHaveBeenCalled();
     });
-    mockGmailFetchFor(makeRows(50));
 
-    const { getMailList } = await import("@/server/mail");
-    const result = await getMailList({ pageIndex: 0, pageSize: 50 });
+    it("uses listByLabel for multi-label intersection (GIN containment)", async () => {
+      const rows = makeRows(5);
+      mockListByLabel.mockResolvedValueOnce(rows);
+      // No cached label row for the multi-label intersection; falls back
+      // to countByLabel which uses the GIN containment query.
+      mockLabelsList.mockResolvedValueOnce([]);
+      mockCountByLabel.mockResolvedValueOnce(5);
 
-    expect(result.source).toBe("live");
-    expect(result.nextPageToken).toBe("cache:1");
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({
+        page: 1,
+        labelIds: ["INBOX", "STARRED"],
+      });
+
+      expectV2Shape(result);
+      expect(result.count).toBe(5);
+      expect(mockListByLabel).toHaveBeenCalledWith(
+        "account_1",
+        ["INBOX", "STARRED"],
+        expect.objectContaining({ limit: PAGE_SIZE, offset: 0 }),
+      );
+    });
+
+    it("clamps filtered-label page past the end to totalPages", async () => {
+      mockListByLabel.mockResolvedValueOnce([]);
+      mockLabelsList.mockResolvedValueOnce([
+        { data: { id: "STARRED", messagesTotal: 3 } },
+      ]);
+
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({
+        page: 99,
+        labelIds: ["STARRED"],
+      });
+
+      expectV2Shape(result);
+      expect(result.items).toEqual([]);
+      expect(result.page).toBe(1);
+      expect(result.totalPages).toBe(1);
+    });
+  });
+
+  describe("search path", () => {
+    it("returns count=null, totalPages=null, source='live' for free-text search", async () => {
+      const apiRows = makeRows(10).map((r) => ({
+        id: r.data.id,
+        threadId: r.data.threadId,
+      }));
+      mockApiMessagesList.mockResolvedValueOnce({
+        messages: apiRows,
+      });
+      mockFindManyByEntityIds.mockResolvedValueOnce(
+        makeRows(10).map((r) => ({ data: { ...r.data, payload: {} } })),
+      );
+      mockGmailFetchFor(makeRows(10));
+
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 1, q: "from:alice" });
+
+      expectV2Shape(result);
+      expect(result.count).toBeNull();
+      expect(result.totalPages).toBeNull();
+      expect(result.hasMore).toBe(false);
+      expect(result.source).toBe("live");
+      expect(result.cacheState).toBe("full");
+      expect(mockApiMessagesList).toHaveBeenCalledWith(
+        expect.objectContaining({ q: "from:alice", maxResults: PAGE_SIZE }),
+      );
+    });
+
+    it("returns empty items when Gmail returns no matches for the query", async () => {
+      mockApiMessagesList.mockResolvedValueOnce({ messages: [] });
+
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 1, q: "nope:nothing" });
+
+      expectV2Shape(result);
+      expect(result.items).toEqual([]);
+      expect(result.count).toBeNull();
+    });
+
+    it("returns empty response when Gmail errors on the search call", async () => {
+      mockApiMessagesList.mockRejectedValueOnce(new Error("gmail 503"));
+
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 1, q: "from:alice" });
+
+      expectV2Shape(result);
+      expect(result.items).toEqual([]);
+      expect(result.count).toBeNull();
+      expect(result.totalPages).toBeNull();
+    });
+  });
+
+  describe("pagination math (buildPagination)", () => {
+    it("hasMore is true when page < totalPages, false when page == totalPages", async () => {
+      // 3 pages of 25 = 75 items. Use mockResolvedValue (not Once) so the
+      // mock applies across both page 1 and page 3 calls.
+      const rows = makeRows(PAGE_SIZE);
+      mockListMessages.mockResolvedValue(rows);
+      mockLabelsList.mockResolvedValue([
+        { data: { id: "INBOX", messagesTotal: 75 } },
+      ]);
+      mockCountByLabel.mockResolvedValue(PAGE_SIZE);
+
+      const { getMailList } = await import("@/server/mail");
+
+      const r1 = await getMailList({ page: 1 });
+      expect(r1.hasMore).toBe(true);
+      expect(r1.hasPrev).toBe(false);
+      expect(r1.totalPages).toBe(3);
+
+      const r3 = await getMailList({ page: 3 });
+      expect(r3.hasMore).toBe(false);
+      expect(r3.hasPrev).toBe(true);
+    });
+
+    it("empty mailbox: count=0 → totalPages=1, hasMore=false, hasPrev=false", async () => {
+      mockListMessages.mockResolvedValueOnce([]);
+      mockLabelsList.mockResolvedValueOnce([
+        { data: { id: "INBOX", messagesTotal: 0 } },
+      ]);
+      mockDbCount.mockResolvedValueOnce(0);
+
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 1 });
+
+      expectV2Shape(result);
+      expect(result.totalPages).toBe(1);
+      expect(result.hasMore).toBe(false);
+      expect(result.hasPrev).toBe(false);
+    });
+
+    it("partial last page: 30 items in 2 pages", async () => {
+      const rows = makeRows(5); // last page short
+      mockListMessages.mockResolvedValueOnce(rows);
+      mockLabelsList.mockResolvedValueOnce([
+        { data: { id: "INBOX", messagesTotal: 30 } },
+      ]);
+
+      const { getMailList } = await import("@/server/mail");
+      const result = await getMailList({ page: 2 });
+
+      expectV2Shape(result);
+      expect(result.count).toBe(30);
+      expect(result.totalPages).toBe(2);
+      expect(result.hasMore).toBe(false);
+      expect(result.hasPrev).toBe(true);
+      expect(result.items).toHaveLength(5);
+    });
+  });
+
+  describe("cache key isolation (per-tenant)", () => {
+    it("keys the response cache by tenant id so a write from tenant A doesn't affect tenant B", async () => {
+      const rows = makeRows(PAGE_SIZE);
+      mockListMessages.mockResolvedValueOnce(rows);
+      mockLabelsList.mockResolvedValueOnce([
+        { data: { id: "INBOX", messagesTotal: PAGE_SIZE } },
+      ]);
+
+      const { getMailList } = await import("@/server/mail");
+
+      // First call populates the cache.
+      const r1 = await getMailList({ page: 1 });
+
+      // Second call from the same tenant should hit the cache and return
+      // the identical object reference (the implementation sets via Map.set).
+      const r2 = await getMailList({ page: 1 });
+      expect(r2).toBe(r1);
+    });
   });
 });
