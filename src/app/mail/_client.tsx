@@ -392,7 +392,7 @@ export function MailInterface({
 // Inlined here rather than imported from a hook to keep the diff focused on
 // the URL-as-truth refactor.
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 function useStateShim<T>(initial: T): [T, (v: T) => void] {
   return useState<T>(initial);
