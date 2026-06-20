@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo } from "react";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 
 import {
   DropdownMenu,
@@ -37,6 +38,8 @@ import {
   useMailProfile,
   useRefreshInbox,
   useClearMailCache,
+  mailKeys,
+  fetchMailThreads,
 } from "@/hooks/use-mail";
 import { markAsReadLocally } from "@/lib/read-emails";
 import type { MailSyncedState as SyncedState } from "@/types/mail";
@@ -112,6 +115,41 @@ export function MailInterface({
     q: gmailParams.query,
     initialData: initial.gmailConnected ? initial.list : undefined,
   });
+
+  const queryClient = useQueryClient();
+
+  // ─── Prefetch page N+1 in the background ──────────────────────────────
+  // After every successful page render, warm the next page's cache slot.
+  // The user clicks Next → instant render from TanStack cache → no extra
+  // fetch. Deep-jumps (page N+5, etc.) bypass this and hit the server's
+  // on-demand sync path instead.
+  useEffect(() => {
+    if (!threadsQuery.data || !threadsQuery.data.hasMore) return;
+    const nextPage = page + 1;
+    const timer = window.setTimeout(() => {
+      queryClient.prefetchQuery({
+        queryKey: mailKeys.threads({
+          page: nextPage,
+          labelIds: gmailParams.labelIds,
+          q: gmailParams.query,
+        }),
+        queryFn: () =>
+          fetchMailThreads({
+            page: nextPage,
+            labelIds: gmailParams.labelIds,
+            q: gmailParams.query,
+          }),
+        staleTime: 60 * 1000,
+      });
+    }, 100);
+    return () => window.clearTimeout(timer);
+  }, [
+    page,
+    threadsQuery.data,
+    queryClient,
+    gmailParams.labelIds,
+    gmailParams.query,
+  ]);
 
   const labelsQuery = useMailLabels(
     initial.gmailConnected ? initial.labels : undefined,

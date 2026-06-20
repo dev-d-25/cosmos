@@ -780,6 +780,22 @@ async function getMailListFromInbox(
     offset,
   });
 
+  // Deep-jump: the user asked for a page the DB doesn't have. Pull just
+  // enough from Gmail to cover the requested slice (one API call, up to
+  // 500 IDs per Gmail's hard limit). The next page N+1 prefetch on the
+  // client will then find these in the DB and render instantly.
+  if (rows.length === 0 && offset > 0) {
+    const syncDepth = offset + PAGE_SIZE;
+    await syncLabelFromGmail(
+      accountId,
+      client,
+      syncDepth,
+      view.labelIds,
+      view.query,
+    );
+    rows = await listMessages(accountId, { limit: PAGE_SIZE, offset });
+  }
+
   const stubIds = rows
     .filter((r) => !isRowEnriched(r))
     .map((r) => (r.data as Record<string, unknown>).id as string)

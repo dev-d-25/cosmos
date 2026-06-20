@@ -248,6 +248,8 @@ export function MailList({
   }
 
   if (items.length === 0) {
+    const showSyncPill = count !== null && count > 0 && cacheState !== "full";
+    const showLoading = loading && count !== null && count > 0;
     return (
       <div className="border-border bg-card flex min-w-0 flex-col border-r">
         <div className="border-border flex h-11 shrink-0 items-center gap-2 border-b px-4">
@@ -273,9 +275,30 @@ export function MailList({
           )}
         </div>
         <div className="flex-1 overflow-y-auto">
-          <div className="text-muted-foreground flex h-full items-center justify-center p-6 text-center text-xs">
-            <p>{searchQuery ? "No results found." : "No mail in this folder."}</p>
-          </div>
+          {showLoading ? (
+            <div className="text-muted-foreground flex h-full items-center justify-center p-6 text-center text-xs">
+              <div className="flex flex-col items-center gap-2">
+                <div className="border-muted-foreground/30 border-t-muted-foreground size-5 animate-spin rounded-full border-2" />
+                <p>Loading page {page}…</p>
+              </div>
+            </div>
+          ) : showSyncPill ? (
+            <div className="text-muted-foreground flex h-full items-center justify-center p-6 text-center text-xs">
+              <div className="flex flex-col items-center gap-1.5">
+                <p>
+                  {cacheState === "empty"
+                    ? `No cache yet for this page · ${count} total`
+                    : `Syncing ${Math.floor(coverage * count)}/${count}…`}
+                  {degraded ? " · count may be stale" : null}
+                </p>
+                <p className="text-muted-foreground/70">click Refresh in the toolbar to sync</p>
+              </div>
+            </div>
+          ) : (
+            <div className="text-muted-foreground flex h-full items-center justify-center p-6 text-center text-xs">
+              <p>{searchQuery ? "No results found." : "No mail in this folder."}</p>
+            </div>
+          )}
         </div>
       </div>
     );

@@ -32,6 +32,8 @@ async function fetchMailThreads(opts: {
   return json as MailListResponse;
 }
 
+export { fetchMailThreads };
+
 async function fetchMailMessage(
   id: string,
   opts?: { refresh?: boolean },
@@ -135,10 +137,10 @@ export function useMailThreads(opts: {
     queryFn: () => fetchMailThreads(opts),
     initialData: opts.initialData,
     placeholderData: (prev) => prev,
-    staleTime: 30 * 1000,
-    // No polling. The server returns cacheState: "partial" | "empty"
-    // while the background sync fills the gap; the user clicks Refresh
-    // (POST /api/mail/refresh) to advance.
+    // No staleTime — every navigation refetches so deep-jumps don't serve
+    // a stale empty payload. The client-side page N+1 prefetch warms the
+    // next cache slot before the user clicks, so the refetch resolves
+    // from the TanStack cache, not the network.
   });
 }
 

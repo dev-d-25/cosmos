@@ -6,7 +6,7 @@ export interface LabelDef {
 }
 
 export const MAIL_LABELS: LabelDef[] = [
-  { id: "INBOX", name: "Inbox", gmailLabel: "INBOX" },
+  { id: "INBOX", name: "Inbox", gmailQuery: "category:primary" },
   { id: "STARRED", name: "Starred", gmailLabel: "STARRED" },
   { id: "SENT", name: "Sent", gmailLabel: "SENT" },
   { id: "DRAFT", name: "Drafts", gmailLabel: "DRAFT" },
