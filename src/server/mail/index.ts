@@ -415,6 +415,7 @@ async function resolveCount(
   view: { labelIds?: string[]; query?: string },
 ): Promise<{ count: number | null; degraded: boolean }> {
   if (classifyView(view) === "search") {
+    console.log(`[mail-debug] resolveCount: search view → count=null`);
     return { count: null, degraded: false };
   }
 
@@ -422,6 +423,7 @@ async function resolveCount(
     const labelId = view.labelIds[0];
     if (!labelId) {
       const dbCount = await countByLabel(accountId, view.labelIds);
+      console.log(`[mail-debug] resolveCount: empty labelId → dbCount=${dbCount}`);
       return { count: dbCount, degraded: false };
     }
     try {
@@ -436,10 +438,16 @@ async function resolveCount(
             | undefined)
         : undefined;
       if (typeof labelTotal === "number" && labelTotal >= 0) {
+        console.log(
+          `[mail-debug] resolveCount: DB cache hit for ${labelId} → ${labelTotal}`,
+        );
         return { count: labelTotal, degraded: false };
       }
-    } catch {
-      // fall through
+      console.log(
+        `[mail-debug] resolveCount: DB row for ${labelId} missing messagesTotal, falling back to labels.get`,
+      );
+    } catch (err) {
+      console.log(`[mail-debug] resolveCount: DB labels.list failed: ${describeError(err)}`);
     }
 
     // 2. Gmail's labels.list may not include messagesTotal; fetch the
@@ -451,20 +459,26 @@ async function resolveCount(
         const apiTotal = (label as Record<string, unknown>).messagesTotal as
           | number
           | undefined;
+        const apiUnread = (label as Record<string, unknown>).messagesUnread as
+          | number
+          | undefined;
+        console.log(
+          `[mail-debug] resolveCount: labels.get(${labelId}) → total=${apiTotal} unread=${apiUnread}`,
+        );
         return typeof apiTotal === "number" && apiTotal >= 0 ? apiTotal : null;
       });
       if (typeof cachedTotal === "number") {
         return { count: cachedTotal, degraded: false };
       }
-    } catch {
-      // fall through to DB count
+    } catch (err) {
+      console.log(`[mail-debug] resolveCount: labels.get(${labelId}) failed: ${describeError(err)}`);
     }
   }
 
   const dbCount = view.labelIds?.length
     ? await countByLabel(accountId, view.labelIds)
     : await client.gmail.db.messages.count();
-
+  console.log(`[mail-debug] resolveCount: dbCount fallback = ${dbCount}`);
   return { count: dbCount, degraded: false };
 }
 
@@ -605,6 +619,10 @@ export async function getMailList(
   if (cached && Date.now() - cached.at < MAIL_LIST_CACHE_TTL) {
     return cached.data;
   }
+
+  console.log(
+    `[mail-debug] getMailList view=${JSON.stringify(view)} page=${requestedPage} → isSearch=${isSearchView} isFiltered=${isFilteredLabel} isQuery=${isQueryView}`,
+  );
 
   let result: MailListResponse;
   if (isSearchView) {
@@ -786,6 +804,9 @@ async function getMailListFromInbox(
   // client will then find these in the DB and render instantly.
   if (rows.length === 0 && offset > 0) {
     const syncDepth = offset + PAGE_SIZE;
+    console.log(
+      `[mail-debug] getMailListFromInbox: DB miss at offset=${offset}, deep-jump sync to depth=${syncDepth}`,
+    );
     await syncLabelFromGmail(
       accountId,
       client,
@@ -794,6 +815,9 @@ async function getMailListFromInbox(
       view.query,
     );
     rows = await listMessages(accountId, { limit: PAGE_SIZE, offset });
+    console.log(
+      `[mail-debug] getMailListFromInbox: after deep-jump, rows=${rows.length}`,
+    );
   }
 
   const stubIds = rows
@@ -995,6 +1019,9 @@ async function syncLabelFromGmail(
       ...(labelIds?.length ? { labelIds } : {}),
       ...(q ? { q, includeSpamTrash: true } : {}),
     })) as Record<string, unknown>;
+    console.log(
+      `[mail-debug] syncLabelFromGmail limit=${limit} labelIds=${JSON.stringify(labelIds)} q=${q ?? "—"} → fetched=${((listResult.messages ?? []) as unknown[]).length} estimate=${listResult.resultSizeEstimate ?? "null"}`,
+    );
   } catch (err) {
     console.error(`[mail] syncLabelFromGmail: Gmail API error: ${describeError(err)}`);
     return { nextPageToken: null, resultSizeEstimate: null, fetched: 0 };
@@ -1147,6 +1174,10 @@ export async function getMailPageData(
         : undefined;
   }
 
+  console.log(
+    `[mail-debug] getMailPageData view=${view} page=${page} → labelIds=${JSON.stringify(labelIds)} query=${viewQuery ?? "—"}`,
+  );
+
   // SSR uses the same PAGE_SIZE as the client. No more SSR_PAGE_SIZE.
   const [list, profile, labels] = await Promise.all([
     getMailList({
@@ -1157,6 +1188,10 @@ export async function getMailPageData(
     getProfile(),
     getLabels(),
   ]);
+
+  console.log(
+    `[mail-debug] getMailPageData result: count=${list.count ?? "null"} items=${list.items.length} cacheState=${list.cacheState} coverage=${list.coverage.toFixed(2)} totalPages=${list.totalPages ?? "null"}`,
+  );
 
   return { tenantId, gmailConnected: true, view, list, profile, labels };
 }

@@ -6,7 +6,13 @@ export interface LabelDef {
 }
 
 export const MAIL_LABELS: LabelDef[] = [
-  { id: "INBOX", name: "Inbox", gmailQuery: "category:primary" },
+  // Gmail's "Primary" tab is the CATEGORY_PERSONAL system label. Using it
+  // directly (instead of a `category:primary` query) lets resolveCount()
+  // call labels.get() and populate messagesUnread in the DB, so the
+  // sidebar badge shows the right number (~800-900). A query view would
+  // be classified as "search" by classifyView() and the pager would
+  // disappear (search returns count=null).
+  { id: "INBOX", name: "Inbox", gmailLabel: "CATEGORY_PERSONAL" },
   { id: "STARRED", name: "Starred", gmailLabel: "STARRED" },
   { id: "SENT", name: "Sent", gmailLabel: "SENT" },
   { id: "DRAFT", name: "Drafts", gmailLabel: "DRAFT" },
@@ -16,7 +22,8 @@ export const MAIL_LABELS: LabelDef[] = [
   { id: "IMPORTANT", name: "Important", gmailLabel: "IMPORTANT" },
   { id: "UNREAD", name: "Unread", gmailLabel: "UNREAD" },
   { id: "divider-2", name: "" },
-  { id: "CATEGORY_PERSONAL", name: "Personal", gmailLabel: "CATEGORY_PERSONAL" },
+  // The categories below are what Gmail filters OUT of Primary. The user
+  // can drill into each one individually.
   { id: "CATEGORY_SOCIAL", name: "Social", gmailLabel: "CATEGORY_SOCIAL" },
   { id: "CATEGORY_UPDATES", name: "Updates", gmailLabel: "CATEGORY_UPDATES" },
   { id: "CATEGORY_PROMOTIONS", name: "Promotions", gmailLabel: "CATEGORY_PROMOTIONS" },

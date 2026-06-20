@@ -116,6 +116,10 @@ export function MailInterface({
     initialData: initial.gmailConnected ? initial.list : undefined,
   });
 
+  console.log(
+    `[mail-debug-client] page=${page} threadsQuery status=${threadsQuery.status} fetched=${threadsQuery.isFetched} data=${threadsQuery.data ? `count=${threadsQuery.data.count} items=${threadsQuery.data.items.length} totalPages=${threadsQuery.data.totalPages}` : "null"} error=${threadsQuery.error?.message ?? "—"}`,
+  );
+
   const queryClient = useQueryClient();
 
   // ─── Prefetch page N+1 in the background ──────────────────────────────
@@ -124,9 +128,18 @@ export function MailInterface({
   // fetch. Deep-jumps (page N+5, etc.) bypass this and hit the server's
   // on-demand sync path instead.
   useEffect(() => {
-    if (!threadsQuery.data || !threadsQuery.data.hasMore) return;
+    if (!threadsQuery.data || !threadsQuery.data.hasMore) {
+      console.log(
+        `[mail-debug-client] prefetch: skipped (hasMore=${threadsQuery.data?.hasMore ?? "—"})`,
+      );
+      return;
+    }
     const nextPage = page + 1;
+    console.log(
+      `[mail-debug-client] prefetch: scheduling page ${nextPage} in 100ms`,
+    );
     const timer = window.setTimeout(() => {
+      console.log(`[mail-debug-client] prefetch: firing for page ${nextPage}`);
       queryClient.prefetchQuery({
         queryKey: mailKeys.threads({
           page: nextPage,
@@ -239,6 +252,12 @@ export function MailInterface({
 
   const labels: MailLabel[] = labelsQuery.data ?? [];
   const profile: MailProfile | null = profileQuery.data ?? null;
+
+  // Log the labels data so we can see what messagesUnread values are
+  // actually reaching the sidebar.
+  console.log(
+    `[mail-debug-client] labels returned: ${labels.map((l) => `${l.id}=${l.messagesUnread}`).join(", ")}`,
+  );
 
   const syncedState: SyncedState = !gmailConnected
     ? "Not connected"
