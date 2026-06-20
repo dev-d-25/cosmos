@@ -15,9 +15,11 @@ const globalForDb = globalThis as unknown as {
 };
 
 const conn = globalForDb.conn ?? postgres(env.DATABASE_URL, {
-  max: 5,                    // limit pool size for serverless
-  idle_timeout: 20,          // close idle connections after 20s
-  connect_timeout: 10,       // fail fast on connection issues
+  max: 10,                   // wider pool — serverless instances multiplex
+  idle_timeout: 600,         // 10 min — keep TLS warm between user bursts
+  connect_timeout: 30,       // tolerate Neon hiccups instead of failing clicks
+  prepare: false,            // skip server-side prepared stmt cache
+                             // (the usual source of "conn in use" under churn)
 });
 globalForDb.conn = conn;
 

@@ -11,6 +11,10 @@ import {
   type RawMessageEntity,
   type UpsertItem,
 } from "@/server/db/mail-entities";
+import {
+  getLabelCount as getCachedLabelCount,
+  invalidateLabelCount,
+} from "./label-count-cache";
 import { toListItem } from "./transformers";
 import {
   GetProfileApiResponseSchema,
@@ -440,13 +444,17 @@ async function resolveCount(
 
     // 2. Gmail's labels.list may not include messagesTotal; fetch the
     //    single label via labels.get which always returns the count.
+    //    Cache the result for 60s so subsequent renders skip the API call.
     try {
-      const label = await client.gmail.api.labels.get({ id: labelId });
-      const apiTotal = (label as Record<string, unknown>).messagesTotal as
-        | number
-        | undefined;
-      if (typeof apiTotal === "number" && apiTotal >= 0) {
-        return { count: apiTotal, degraded: false };
+      const cachedTotal = await getCachedLabelCount(accountId, labelId, async () => {
+        const label = await client.gmail.api.labels.get({ id: labelId });
+        const apiTotal = (label as Record<string, unknown>).messagesTotal as
+          | number
+          | undefined;
+        return typeof apiTotal === "number" && apiTotal >= 0 ? apiTotal : null;
+      });
+      if (typeof cachedTotal === "number") {
+        return { count: cachedTotal, degraded: false };
       }
     } catch {
       // fall through to DB count
@@ -929,6 +937,12 @@ export async function refreshInbox(): Promise<{ synced: number }> {
     labelIds = undefined;
   } else {
     labelIds = [INBOX_LABEL];
+  }
+
+  if (labelIds) {
+    for (const labelId of labelIds) {
+      invalidateLabelCount(accountId, labelId);
+    }
   }
 
   // Phase 1: sync message IDs and warm the cache.
