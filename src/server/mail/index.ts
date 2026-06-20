@@ -962,22 +962,35 @@ export async function prefetchFullBody(
 
 // ─── Refresh: user-initiated sync ────────────────────────────────────────
 
-export async function refreshInbox(): Promise<{ synced: number }> {
+export async function refreshInbox(
+  viewId: string = "INBOX",
+): Promise<{ synced: number }> {
   const ctx = await getClient();
   if (!ctx) return { synced: 0 };
   const { tenantId, accountId, client } = ctx;
 
   invalidateMailListCacheForTenant(tenantId);
 
-  const inboxDef = MAIL_LABELS.find((l) => l.id === "INBOX");
+  // Drive the sync off the active view's label definition (not a
+  // hardcoded INBOX). For the default "INBOX" view we filter to
+  // CATEGORY_PERSONAL (Primary); for "ALL_MAIL" we sync the catch-all
+  // INBOX label. Any future view added to MAIL_LABELS inherits this
+  // automatically.
+  const viewDef = MAIL_LABELS.find((l) => l.id === viewId) ?? MAIL_LABELS[0];
   let labelIds: string[] | undefined;
   let viewQuery: string | undefined;
-  if (inboxDef?.gmailQuery) {
-    viewQuery = inboxDef.gmailQuery;
+  if (viewDef?.gmailQuery) {
+    viewQuery = viewDef.gmailQuery;
     labelIds = undefined;
+  } else if (viewDef?.gmailLabel) {
+    labelIds = [viewDef.gmailLabel];
   } else {
     labelIds = [INBOX_LABEL];
   }
+
+  console.log(
+    `[mail-debug] refreshInbox: view=${viewId} syncing labelIds=${JSON.stringify(labelIds)} query=${viewQuery ?? "—"}`,
+  );
 
   if (labelIds) {
     for (const labelId of labelIds) {
@@ -1071,13 +1084,87 @@ export async function markAsRead(
 
   return { marked: ids.length };
 }
+const LABEL_COUNT_TTL_MS = 5 * 60 * 1000;
+
+/**
+ * Fetch a fresh count + unread for one label and persist to DB.
+ * Used by getLabels() to fill gaps and refresh stale rows.
+ */
+async function refreshLabelCount(
+  client: ReturnType<typeof corsair.withTenant>,
+  labelId: string,
+): Promise<boolean> {
+  try {
+    const label = (await client.gmail.api.labels.get({ id: labelId })) as
+      | Record<string, unknown>
+      | null;
+    const labelIdFromResult = label?.id;
+    if (typeof labelIdFromResult !== "string") return false;
+    await client.gmail.db.labels.upsertByEntityId(labelIdFromResult, {
+      ...label,
+      id: labelIdFromResult,
+      createdAt: new Date(),
+    });
+    return true;
+  } catch (err) {
+    console.log(
+      `[mail-debug] getLabels: labels.get(${labelId}) failed: ${describeError(err)}`,
+    );
+    return false;
+  }
+}
 
 export async function getLabels(): Promise<MailLabel[]> {
   const ctx = await getClient();
   if (!ctx) return [];
   const { client } = ctx;
 
-  const cached = await client.gmail.db.labels.list();
+  let cached = await client.gmail.db.labels.list();
+
+  // ─── Sweep: refresh counts for every system label that's missing them
+  // or whose persisted row is older than LABEL_COUNT_TTL_MS. Per-label
+  // labels.get() calls run in parallel; failures fall back to whatever
+  // the DB row had, even if stale. The 5-minute TTL keeps the sidebar
+  // honest without hammering Gmail's rate limit on every page load.
+  const now = Date.now();
+  const systemLabelIds = MAIL_LABELS.flatMap((def) =>
+    def.gmailLabel ? [def.gmailLabel] : [],
+  );
+  const idsNeedingRefresh = new Set<string>();
+
+  for (const id of systemLabelIds) {
+    const row = cached.find(
+      (r) => (r.data as Record<string, unknown>)?.id === id,
+    );
+    if (!row) {
+      idsNeedingRefresh.add(id);
+      continue;
+    }
+    const total = (row.data as Record<string, unknown>)?.messagesTotal;
+    const rawUpdated = (row as { updated_at?: Date | string }).updated_at;
+    const updated =
+      rawUpdated instanceof Date
+        ? rawUpdated.getTime()
+        : typeof rawUpdated === "string"
+          ? Date.parse(rawUpdated)
+          : null;
+    if (typeof total !== "number" || updated === null || now - updated > LABEL_COUNT_TTL_MS) {
+      idsNeedingRefresh.add(id);
+    }
+  }
+
+  if (idsNeedingRefresh.size > 0) {
+    const results = await Promise.allSettled(
+      Array.from(idsNeedingRefresh).map((id) => refreshLabelCount(client, id)),
+    );
+    const refreshed = results.filter((r) => r.status === "fulfilled" && r.value).length;
+    console.log(
+      `[mail-debug] getLabels: refreshed ${refreshed}/${idsNeedingRefresh.size} labels via labels.get`,
+    );
+    // Re-read so the response includes the freshly-persisted counts.
+    cached = await client.gmail.db.labels.list();
+  }
+
   if (cached.length > 0) {
     return cached
       .map((r) => MailLabelSchema.safeParse(r.data))
@@ -1088,13 +1175,15 @@ export async function getLabels(): Promise<MailLabel[]> {
       .map((result) => result.data);
   }
 
+  // Fallback: never populated locally — fetch fresh from Gmail.
   const result = await client.gmail.api.labels.list({});
   const rawLabels = (result.labels ?? []) as Array<Record<string, unknown>>;
 
   return rawLabels
     .map((l) => MailLabelSchema.safeParse(l))
     .filter(
-      (result): result is { success: true; data: MailLabel } => result.success,
+      (result): result is { success: true; data: MailLabel } =>
+        result.success,
     )
     .map((result) => result.data);
 }

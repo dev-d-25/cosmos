@@ -77,8 +77,8 @@ async function fetchMailProfile(): Promise<MailProfile | null> {
   return res.json();
 }
 
-async function refreshInbox(): Promise<{ synced: number }> {
-  const res = await fetch("/api/mail/refresh", {
+async function refreshInbox(view: string = "INBOX"): Promise<{ synced: number }> {
+  const res = await fetch(`/api/mail/refresh?view=${encodeURIComponent(view)}`, {
     method: "POST",
     cache: "no-store",
   });
@@ -176,7 +176,7 @@ export function useRefreshInbox() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: refreshInbox,
+    mutationFn: (view: string = "INBOX") => refreshInbox(view),
     onSuccess: () => {
       // Refetch every active mail query. TanStack will re-read params from
       // each subscriber's useMailThreads call, so the current page reloads.

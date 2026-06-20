@@ -179,7 +179,7 @@ export function MailInterface({
   const connectedPlugin = searchParams.get("connected");
   useEffect(() => {
     if (connectedPlugin) {
-      refreshMutation.mutate();
+      refreshMutation.mutate(activeLabel);
       navigate({ connected: null });
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -302,8 +302,8 @@ export function MailInterface({
   }, [navigate]);
 
   const onRefresh = useCallback(() => {
-    refreshMutation.mutate();
-  }, [refreshMutation]);
+    refreshMutation.mutate(activeLabel);
+  }, [refreshMutation, activeLabel]);
 
   const onClearCache = useCallback(() => {
     clearCacheMutation.mutate();

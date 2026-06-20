@@ -18,6 +18,11 @@ export const MAIL_LABELS: LabelDef[] = [
   { id: "DRAFT", name: "Drafts", gmailLabel: "DRAFT" },
   { id: "ARCHIVE", name: "Archive", gmailQuery: "-label:inbox" },
   { id: "SPAM", name: "Spam", gmailLabel: "SPAM" },
+  // "All Mail" is Gmail's catch-all INBOX count — the number that lives
+  // in Gmail's sidebar "Inbox" row (e.g. 694 unread / 953 total). It
+  // includes every category. Distinct from the Inbox entry above, which
+  // is filtered to Primary.
+  { id: "ALL_MAIL", name: "All Mail", gmailLabel: "INBOX" },
   { id: "divider-1", name: "" },
   { id: "IMPORTANT", name: "Important", gmailLabel: "IMPORTANT" },
   { id: "UNREAD", name: "Unread", gmailLabel: "UNREAD" },
