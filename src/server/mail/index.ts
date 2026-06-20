@@ -744,6 +744,28 @@ async function getMailListFromFilteredView(
     offset,
   });
 
+  // Deep-jump: user asked for a page the DB doesn't have. Pull just
+  // enough from Gmail to cover the requested slice (one API call, up
+  // to 500 IDs per Gmail's hard limit). The next page N+1 prefetch
+  // then finds these in the DB and renders instantly.
+  if (rows.length === 0 && offset > 0) {
+    const syncDepth = offset + PAGE_SIZE;
+    console.log(
+      `[mail-debug] getMailListFromFilteredView: DB miss at offset=${offset}, deep-jump sync to depth=${syncDepth} for labelIds=${JSON.stringify(labelIds)} query=${view.query ?? "—"}`,
+    );
+    await syncLabelFromGmail(
+      accountId,
+      client,
+      syncDepth,
+      view.labelIds,
+      view.query,
+    );
+    rows = await listByLabel(accountId, labelIds, { limit: PAGE_SIZE, offset });
+    console.log(
+      `[mail-debug] getMailListFromFilteredView: after deep-jump, rows=${rows.length}`,
+    );
+  }
+
   const stubIds = rows
     .filter((r) => !isRowEnriched(r))
     .map((r) => r.data.id)
@@ -964,6 +986,7 @@ export async function prefetchFullBody(
 
 export async function refreshInbox(
   viewId: string = "INBOX",
+  page: number = 1,
 ): Promise<{ synced: number }> {
   const ctx = await getClient();
   if (!ctx) return { synced: 0 };
@@ -988,8 +1011,14 @@ export async function refreshInbox(
     labelIds = [INBOX_LABEL];
   }
 
+  // Sync depth covers the requested page so a Refresh on page 2 doesn't
+  // leave the user staring at "Syncing 25/N" with an empty list. One
+  // Gmail API call returns up to 500 message IDs.
+  const requestedPage = Math.max(1, Math.floor(page));
+  const syncDepth = Math.max(PAGE_SIZE, (requestedPage - 1) * PAGE_SIZE + PAGE_SIZE);
+
   console.log(
-    `[mail-debug] refreshInbox: view=${viewId} syncing labelIds=${JSON.stringify(labelIds)} query=${viewQuery ?? "—"}`,
+    `[mail-debug] refreshInbox: view=${viewId} page=${requestedPage} syncing labelIds=${JSON.stringify(labelIds)} query=${viewQuery ?? "—"} depth=${syncDepth}`,
   );
 
   if (labelIds) {
@@ -1000,7 +1029,7 @@ export async function refreshInbox(
 
   // Phase 1: sync message IDs and warm the cache.
   const syncResult = await syncLabelFromGmail(
-    accountId, client, PAGE_SIZE, labelIds, viewQuery,
+    accountId, client, syncDepth, labelIds, viewQuery,
   );
 
   // Phase 2: refresh label.messagesTotal for every label so the next
