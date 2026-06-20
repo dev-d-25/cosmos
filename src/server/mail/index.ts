@@ -155,12 +155,27 @@ async function enrichStubs(
     return;
   }
 
-  const results = await Promise.allSettled(
-    needsEnrichment.map(async (id) => {
-      const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&${ENRICH_HEADERS.map((h) => `metadataHeaders=${encodeURIComponent(h)}`).join("&")}`;
+  async function fetchWithRetry(url: string, retries = 3, delayMs = 1000): Promise<Response> {
+    for (let attempt = 0; attempt <= retries; attempt++) {
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${accessToken}` },
       });
+      if (res.status === 429 && attempt < retries) {
+        const retryAfter = res.headers.get("Retry-After");
+        const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : delayMs * Math.pow(2, attempt);
+        console.log(`[mail] enrichStubs: rate limited (429), retrying in ${waitMs}ms (attempt ${attempt + 1}/${retries})`);
+        await new Promise((r) => setTimeout(r, waitMs));
+        continue;
+      }
+      return res;
+    }
+    throw new Error("exhausted retries");
+  }
+
+  const results = await Promise.allSettled(
+    needsEnrichment.map(async (id) => {
+      const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=metadata&${ENRICH_HEADERS.map((h) => `metadataHeaders=${encodeURIComponent(h)}`).join("&")}`;
+      const res = await fetchWithRetry(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const raw = (await res.json()) as Record<string, unknown>;
       return { id, raw };
@@ -228,27 +243,24 @@ async function enrichStubs(
  *
  * Single Gmail API call + single DB round-trip. Returned shape mirrors
  * the SDK response so callers can swap it in transparently.
+ *
+ * If Gmail returns 401 (token expired mid-session), refreshes via the
+ * SDK's `_refreshAuth` hook and retries once. This is the same pattern
+ * `getAttachmentContent` uses and is necessary because `get_access_token`
+ * can return an expired token (the SDK only refreshes on its own clock,
+ * not on demand from callers).
  */
 async function fetchAndPersistFullBody(
   accountId: string,
   client: ReturnType<typeof corsair.withTenant>,
   id: string,
 ): Promise<Record<string, unknown>> {
-  const accessToken = await client.gmail.keys.get_access_token();
-  if (!accessToken) {
-    throw new Error("no_access_token");
+  const tokenResult = await fetchGmailMessageWithRefresh(client, id);
+  if (!tokenResult.ok) {
+    throw tokenResult.error;
   }
+  const raw = tokenResult.value;
 
-  const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`;
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`gmail_${res.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
-  }
-
-  const raw = (await res.json()) as Record<string, unknown>;
   const payload = raw.payload as
     | { headers?: Array<{ name?: string; value?: string }> }
     | undefined;
@@ -277,6 +289,59 @@ async function fetchAndPersistFullBody(
   ]);
 
   return raw;
+}
+
+/**
+ * Fetch a Gmail message body with refresh-on-401 retry. Returns either
+ * `{ ok: true, value }` or `{ ok: false, error }` so the caller can
+ * distinguish a successful retry from a real failure.
+ *
+ * The retry fires at most once. After that, the error is returned.
+ */
+async function fetchGmailMessageWithRefresh(
+  client: ReturnType<typeof corsair.withTenant>,
+  id: string,
+): Promise<
+  | { ok: true; value: Record<string, unknown> }
+  | { ok: false; error: Error }
+> {
+  let accessToken = await client.gmail.keys.get_access_token();
+  if (!accessToken) {
+    return { ok: false, error: new Error("no_access_token") };
+  }
+
+  const doFetch = async (token: string): Promise<Response> => {
+    const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`;
+    return fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  };
+
+  let response = await doFetch(accessToken);
+  if (response.status === 401) {
+    const gmail = client.gmail as unknown as {
+      _refreshAuth?: () => Promise<string>;
+    };
+    if (gmail._refreshAuth) {
+      try {
+        accessToken = await gmail._refreshAuth();
+        response = await doFetch(accessToken);
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
+      }
+    }
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => "");
+    return {
+      ok: false,
+      error: new Error(
+        `gmail_${response.status}${body ? `: ${body.slice(0, 200)}` : ""}`,
+      ),
+    };
+  }
+
+  const value = (await response.json()) as Record<string, unknown>;
+  return { ok: true, value };
 }
 
 async function getClient() {
@@ -350,10 +415,12 @@ async function resolveCount(
   }
 
   if (view.labelIds?.length === 1) {
+    const labelId = view.labelIds[0];
     try {
+      // 1. Try cached label from DB first
       const labels = await client.gmail.db.labels.list();
       const row = labels.find(
-        (l) => (l.data as Record<string, unknown>).id === view.labelIds![0],
+        (l) => (l.data as Record<string, unknown>).id === labelId,
       );
       const labelTotal = row
         ? ((row.data as Record<string, unknown>).messagesTotal as
@@ -362,6 +429,20 @@ async function resolveCount(
         : undefined;
       if (typeof labelTotal === "number" && labelTotal >= 0) {
         return { count: labelTotal, degraded: false };
+      }
+    } catch {
+      // fall through
+    }
+
+    // 2. Gmail's labels.list may not include messagesTotal; fetch the
+    //    single label via labels.get which always returns the count.
+    try {
+      const label = await client.gmail.api.labels.get({ id: labelId });
+      const apiTotal = (label as Record<string, unknown>).messagesTotal as
+        | number
+        | undefined;
+      if (typeof apiTotal === "number" && apiTotal >= 0) {
+        return { count: apiTotal, degraded: false };
       }
     } catch {
       // fall through to DB count

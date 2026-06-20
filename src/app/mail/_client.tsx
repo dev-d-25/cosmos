@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 
 import {
@@ -123,6 +123,15 @@ export function MailInterface({
 
   const refreshMutation = useRefreshInbox();
   const clearCacheMutation = useClearMailCache();
+
+  // Auto-refresh when redirected after OAuth connect (?connected=gmail)
+  const connectedPlugin = searchParams.get("connected");
+  useEffect(() => {
+    if (connectedPlugin) {
+      refreshMutation.mutate();
+      navigate({ connected: null });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const messageQuery = useMailMessage(selectedId);
 

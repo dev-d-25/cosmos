@@ -36,6 +36,8 @@ function MailListRow({
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   const firedRef = useRef(false);
+  const onPrefetchRef = useRef(onPrefetch);
+  onPrefetchRef.current = onPrefetch;
 
   useEffect(() => {
     const el = ref.current;
@@ -51,7 +53,7 @@ function MailListRow({
           if (dwellTimer === null && !firedRef.current) {
             dwellTimer = window.setTimeout(() => {
               firedRef.current = true;
-              onPrefetch(item.id);
+              onPrefetchRef.current(item.id);
               dwellTimer = null;
             }, PREFETCH_DWELL_MS);
           }
@@ -68,7 +70,7 @@ function MailListRow({
       observer.disconnect();
       if (dwellTimer !== null) clearTimeout(dwellTimer);
     };
-  }, [item.id, onPrefetch]);
+  }, [item.id]);
 
   return (
     <button
@@ -181,15 +183,29 @@ export function MailList({
   onClearSearch?: () => void;
 }) {
   const prefetchMutation = usePrefetchFullBody();
+  // In-flight ids: don't fire the same id twice concurrently.
   const inflightRef = useRef<Set<string>>(new Set());
+  // Failed ids for this page-load: don't retry until the user navigates
+  // or the cache is cleared. Without this, a 401 from an expired token
+  // (or a transient Gmail error) hammers the server on every
+  // IntersectionObserver cycle for visible rows.
+  const failedRef = useRef<Set<string>>(new Set());
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const onPrefetch = useCallback(
     (id: string) => {
-      // Dedupe: don't fire if a prefetch for this id is already in flight.
+      // Skip ids that already failed this cycle. The retry would hit the
+      // same 401 / rate-limit error and waste a server round-trip.
+      if (failedRef.current.has(id)) return;
       if (inflightRef.current.has(id)) return;
       inflightRef.current.add(id);
       prefetchMutation.mutate(id, {
+        onError: () => {
+          // Mark failed so we don't keep retrying. The user can clear
+          // the cache to reset, or the next page navigation will get a
+          // fresh row set with empty failedRef.
+          failedRef.current.add(id);
+        },
         onSettled: () => {
           inflightRef.current.delete(id);
         },
