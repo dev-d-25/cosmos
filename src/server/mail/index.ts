@@ -416,6 +416,10 @@ async function resolveCount(
 
   if (view.labelIds?.length === 1) {
     const labelId = view.labelIds[0];
+    if (!labelId) {
+      const dbCount = await countByLabel(accountId, view.labelIds);
+      return { count: dbCount, degraded: false };
+    }
     try {
       // 1. Try cached label from DB first
       const labels = await client.gmail.db.labels.list();
