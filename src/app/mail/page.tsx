@@ -19,15 +19,11 @@ async function MailPageInner({ searchParams }: { searchParams: SearchParams }) {
   const page = Number.isFinite(rawPage) && rawPage >= 1
     ? Math.floor(rawPage)
     : 1;
-  const id = sp?.id ?? null;
 
-  // SSR loads the same page the URL asks for, so refresh on /mail?page=5
-  // returns page 5 data — no hydration flash, no client refetch just to
-  // recover the page the URL already named.
   const data = await getMailPageData({ view: label, page });
   if (!data) redirect("/");
 
-  return <MailInterface initial={data} initialLabel={label} initialPage={page} initialSelectedId={id} />;
+  return <MailInterface initial={data} initialLabel={label} />;
 }
 
 export default async function MailPage({

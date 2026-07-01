@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
-import { getMailList } from "@/server/mail";
-import { MailListResponseSchema } from "@/server/mail/schemas";
 import { withMailAuth } from "@/lib/mail/with-mail-auth";
+import { getThreadList } from "@/server/mail/mail-commands";
 
 export const GET = withMailAuth(async (request) => {
   const url = new URL(request.url);
@@ -17,11 +16,11 @@ export const GET = withMailAuth(async (request) => {
     ? Math.floor(parsedPage)
     : 1;
 
-  const data = await getMailList({
+  const result = await getThreadList({
     page,
     labelIds,
     q: rawQ,
   });
-  const validated = MailListResponseSchema.parse(data);
-  return NextResponse.json(validated);
+  if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
+  return NextResponse.json(result.data);
 });

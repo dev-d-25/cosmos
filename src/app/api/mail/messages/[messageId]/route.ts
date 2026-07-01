@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
-import { getMessage } from "@/server/mail";
-import { AuthMissingError } from "corsair/core";
-import { getSessionTenantId } from "@/server/auth";
+import { getMessageById } from "@/server/mail/mail-commands";
 import { z } from "zod";
 import { MailMessageSchema, MailMessageQuerySchema } from "@/server/mail/schemas";
 import { toMailMessage } from "@/server/mail/transformers";
@@ -10,11 +8,6 @@ export async function GET(
   _req: Request,
   { params }: { params: Promise<{ messageId: string }> },
 ) {
-  const tenantId = await getSessionTenantId();
-  if (!tenantId) {
-    return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
-  }
-
   const { messageId } = await params;
 
   // Parse the query separately so only query errors return 400.
@@ -34,10 +27,15 @@ export async function GET(
   }
 
   try {
-    const result = await getMessage(messageId, { force: query.refresh === "true" });
-    if (!result) return NextResponse.json({ error: "Not found" }, { status: 404 });
-
-    const transformed = toMailMessage(result.message);
+    const result = await getMessageById(messageId, { force: query.refresh === "true" });
+    if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
+    
+    // Type guard to ensure result.data is not null
+    if (result.data === null) {
+      return NextResponse.json({ error: "Not found" }, { status: 404 });
+    }
+    
+    const transformed = toMailMessage(result.data.message as Record<string, unknown>);
     const parsed = MailMessageSchema.safeParse(transformed);
     if (!parsed.success) {
       console.error("[mail] Invalid message data shape:", parsed.error.issues);
@@ -49,14 +47,12 @@ export async function GET(
 
     return NextResponse.json({
       message: parsed.data,
-      source: result.source,
+      source: result.data.source,
     });
   } catch (err) {
-    if (err instanceof AuthMissingError) {
-      return NextResponse.json({ error: "gmail_not_connected" }, { status: 409 });
-    }
-    console.error("[mail] getMessage failed:", err);
-    const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ error: message }, { status: 500 });
+    // This shouldn't happen since getMessageById catches all errors and returns them in CommandResult
+    // But keeping it for safety
+    console.error("[mail] getMessageById failed:", err);
+    return NextResponse.json({ error: "Internal server error" }, { status: 500 });
   }
 }
