@@ -1,5 +1,3 @@
-"use server";
-
 export { getMailList, refreshInbox, getMailPageData, getLabels, getProfile, invalidateMailListCacheForTenant } from "./mail-list";
 export type { GetMailListOpts } from "./mail-list";
 export { getMessage, prefetchFullBody, getAttachmentContent } from "./mail-messages";
