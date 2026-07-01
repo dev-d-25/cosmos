@@ -1,5 +1,3 @@
-"use server";
-
 import { corsair } from "@/server/corsair";
 import {
   type RawMessageEntity,

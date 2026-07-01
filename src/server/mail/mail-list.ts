@@ -62,10 +62,10 @@ function getMailListCacheKey(
   return `${tenantId}:${viewToken(view)}:${page}`;
 }
 
-export function invalidateMailListCacheForTenant(
+export async function invalidateMailListCacheForTenant(
   tenantId: string,
   view?: { labelIds?: string[]; query?: string },
-): void {
+): Promise<void> {
   const prefix = view
     ? `${tenantId}:${viewToken(view)}:`
     : `${tenantId}:`;

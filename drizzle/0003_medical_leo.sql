@@ -1,0 +1,2 @@
+DROP INDEX "idx_corsair_entities_tenant_type_entity";--> statement-breakpoint
+CREATE UNIQUE INDEX "idx_corsair_entities_tenant_type_entity" ON "corsair_entities" USING btree ("account_id","entity_type","entity_id");
