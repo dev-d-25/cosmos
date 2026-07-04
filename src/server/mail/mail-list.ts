@@ -17,7 +17,6 @@ import {
 } from "./label-count-cache";
 import { toListItem } from "./transformers";
 import {
-  MailLabelSchema,
   PAGE_SIZE,
 } from "./schemas";
 import type {
@@ -102,7 +101,7 @@ function isRowEnriched(row: { data: Record<string, unknown> }): boolean {
   return false;
 }
 
-function describeError(err: unknown): string {
+export function describeError(err: unknown): string {
   if (err && typeof err === "object") {
     const e = err as {
       status?: number;
