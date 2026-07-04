@@ -1,10 +1,7 @@
-import { processOAuthCallback } from "corsair/oauth";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 
-import { corsair } from "@/server/corsair";
-
-const REDIRECT_URI = `${process.env.APP_URL}/api/auth/corsair`;
+import { completeOAuth } from "@/server/connected-account";
 
 function escapeHtml(value: string): string {
   return value
@@ -50,17 +47,10 @@ export async function GET(request: NextRequest) {
   }
 
   try {
-    const result = await processOAuthCallback(corsair, {
-      code,
-      state,
-      redirectUri: REDIRECT_URI,
-    });
+    const { plugin } = await completeOAuth(code, state);
 
     const response = NextResponse.redirect(
-      new URL(
-        "/mail?connected=" + encodeURIComponent(result.plugin),
-        request.url,
-      ),
+      new URL("/mail?connected=" + encodeURIComponent(plugin), request.url),
     );
     response.cookies.delete("oauth_state");
     return response;
