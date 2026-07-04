@@ -14,6 +14,14 @@ export async function POST(request: Request) {
     const { action } = body as { action: string };
     const name = ACTIONS[action];
     if (!name) return NextResponse.json({ error: `Unknown action: ${action}` }, { status: 400 });
+
+    const { threadId, ids } = body as { threadId?: string; ids?: string[] };
+    if (name === "markRead" || name === "markUnread") {
+      if (!ids?.length) return NextResponse.json({ error: "ids required" }, { status: 400 });
+    } else if (!threadId) {
+      return NextResponse.json({ error: "threadId required" }, { status: 400 });
+    }
+
     await applyThreadAction(name, body);
     return NextResponse.json({ ok: true });
   } catch (err) {

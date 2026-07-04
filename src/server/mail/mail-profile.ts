@@ -1,7 +1,7 @@
 "use server";
 
 import { corsair } from "@/server/corsair";
-import { getClient } from "./mail-list";
+import { getClient, describeError } from "./mail-list";
 import {
   GetProfileApiResponseSchema,
   MailLabelSchema,
@@ -31,15 +31,6 @@ async function refreshLabelCount(
     });
     return true;
   } catch (err) {
-    const describeError = (e: unknown): string => {
-      if (e && typeof e === "object") {
-        const obj = e as { status?: number; code?: number | string; message?: string };
-        if (obj.status) return `HTTP ${obj.status}`;
-        if (obj.code != null) return `code ${obj.code}`;
-        if (obj.message) return obj.message.slice(0, 200);
-      }
-      return String(e).slice(0, 200);
-    };
     console.log(
       `[mail-debug] getLabels: labels.get(${labelId}) failed: ${describeError(err)}`,
     );
