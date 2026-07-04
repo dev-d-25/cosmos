@@ -547,7 +547,7 @@ export async function refreshInbox(
   if (!ctx) return { synced: 0 };
   const { tenantId, accountId, client } = ctx;
 
-  invalidateMailListCacheForTenant(tenantId);
+  await invalidateMailListCacheForTenant(tenantId);
 
   const viewDef = MAIL_LABELS.find((l) => l.id === viewId) ?? MAIL_LABELS[0];
   let labelIds: string[] | undefined;
@@ -584,7 +584,7 @@ export async function refreshInbox(
     console.log(`[mail] refreshInbox: labels.list failed: ${describeError(err)}`);
   }
 
-  invalidateMailListCacheForTenant(tenantId);
+  await invalidateMailListCacheForTenant(tenantId);
 
   return { synced: syncResult.fetched };
 }

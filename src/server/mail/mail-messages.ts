@@ -6,63 +6,14 @@ import {
   type RawMessageEntity,
 } from "@/server/db/mail-entities";
 import { getClient } from "./mail-list";
-
-async function fetchGmailMessageWithRefresh(
-  client: ReturnType<typeof corsair.withTenant>,
-  id: string,
-): Promise<
-  | { ok: true; value: Record<string, unknown> }
-  | { ok: false; error: Error }
-> {
-  let accessToken = await client.gmail.keys.get_access_token();
-  if (!accessToken) {
-    return { ok: false, error: new Error("no_access_token") };
-  }
-
-  const doFetch = async (token: string): Promise<Response> => {
-    const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${id}?format=full`;
-    return fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-  };
-
-  let response = await doFetch(accessToken);
-  if (response.status === 401) {
-    const gmail = client.gmail as unknown as {
-      _refreshAuth?: () => Promise<string>;
-    };
-    if (gmail._refreshAuth) {
-      try {
-        accessToken = await gmail._refreshAuth();
-        response = await doFetch(accessToken);
-      } catch (err) {
-        return { ok: false, error: err instanceof Error ? err : new Error(String(err)) };
-      }
-    }
-  }
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    return {
-      ok: false,
-      error: new Error(
-        `gmail_${response.status}${body ? `: ${body.slice(0, 200)}` : ""}`,
-      ),
-    };
-  }
-
-  const value = (await response.json()) as Record<string, unknown>;
-  return { ok: true, value };
-}
+import { fetchMessageFull, fetchAttachment } from "./gmail-adapter";
 
 async function fetchAndPersistFullBody(
   accountId: string,
   client: ReturnType<typeof corsair.withTenant>,
   id: string,
 ): Promise<Record<string, unknown>> {
-  const tokenResult = await fetchGmailMessageWithRefresh(client, id);
-  if (!tokenResult.ok) {
-    throw tokenResult.error;
-  }
-  const raw = tokenResult.value;
+  const raw = await fetchMessageFull(client, id);
 
   const payload = raw.payload as
     | { headers?: Array<{ name?: string; value?: string }> }
@@ -80,7 +31,6 @@ async function fetchAndPersistFullBody(
         subject: get("Subject"),
         from: get("From"),
         to: get("To"),
-        createdAt: new Date(),
       },
     },
   ]);
@@ -152,48 +102,17 @@ export async function getAttachmentContent(
   }
   const { client } = ctx;
 
-  const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${messageId}/attachments/${attachmentId}`;
-
-  const fetchOnce = async (token: string) =>
-    fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-
-  let accessToken = await client.gmail.keys.get_access_token();
-  if (!accessToken) {
-    return { ok: false, status: 401, error: "no_access_token" };
-  }
-
-  let response = await fetchOnce(accessToken);
-
-  if (response.status === 401) {
-    const gmail = client.gmail as unknown as {
-      _refreshAuth?: () => Promise<string>;
-    };
-    if (gmail._refreshAuth) {
-      try {
-        accessToken = await gmail._refreshAuth();
-        response = await fetchOnce(accessToken);
-      } catch {
-        // fall through with the original 401
-      }
-    }
-  }
-
-  if (!response.ok) {
-    let body = "";
-    try {
-      body = await response.text();
-    } catch {}
-    console.warn(
-      `[mail] attachment fetch failed: messageId=${messageId} attachmentId=${attachmentId} status=${response.status} body=${body.slice(0, 200)}`,
-    );
+  try {
+    const result = await fetchAttachment(client, messageId, attachmentId);
+    return { ok: true, data: result.data, size: result.size };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const statusPart = message.includes("gmail_") ? message.split("_")[1] : undefined;
+    const status = statusPart ? parseInt(statusPart) || 500 : 500;
     return {
       ok: false,
-      status: response.status,
-      body: body.slice(0, 500),
-      error: `gmail_${response.status}`,
+      status,
+      error: message,
     };
   }
-
-  const result = (await response.json()) as { data: string; size: number };
-  return { ok: true, data: result.data, size: result.size };
 }

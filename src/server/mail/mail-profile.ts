@@ -1,7 +1,8 @@
 "use server";
 
 import { corsair } from "@/server/corsair";
-import { getClient, describeError } from "./mail-list";
+import { getClient } from "./mail-list";
+import { describeError } from "./mail-utils";
 import {
   GetProfileApiResponseSchema,
   MailLabelSchema,
