@@ -12,10 +12,8 @@ import {
   type UpsertItem,
 } from "@/server/db/mail-entities";
 import {
-  getLabelCount as getCachedLabelCount,
   invalidateLabelCount,
 } from "./label-count-cache";
-import { toListItem } from "./transformers";
 import {
   PAGE_SIZE,
 } from "./schemas";
@@ -27,52 +25,26 @@ import type {
   MailProfile,
 } from "./schemas";
 import { MAIL_LABELS } from "@/lib/mail/labels";
+import { toListItem } from "./transformers";
+import {
+  isFilteredLabelView,
+  classifyView,
+  isRowEnriched,
+  rowsToListItems,
+  sortByReceivedDesc,
+  buildPageMeta,
+  emptyResponse,
+  getMailListCacheKey,
+  checkMailListCache,
+  setMailListCache,
+  invalidateMailListCacheForTenant,
+  resolveCount,
+} from "./mail-read-model";
 
 const INBOX_LABEL = "INBOX";
 const ENRICH_HEADERS = ["Subject", "From", "To", "Date"];
 
-const mailListCache = new Map<string, { data: MailListResponse; at: number }>();
-const MAIL_LIST_CACHE_TTL = 30_000;
-
-function hashViewToken(s: string): string {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) {
-    h = ((h << 5) + h + s.charCodeAt(i)) | 0;
-  }
-  return (h >>> 0).toString(36);
-}
-
-function viewToken(view: {
-  labelIds?: string[];
-  query?: string;
-}): string {
-  if (view.labelIds?.length) return `l:${[...view.labelIds].sort().join("+")}`;
-  if (view.query) {
-    if (!view.labelIds) return `q:${hashViewToken(view.query)}`;
-    return `s:${hashViewToken(view.query)}`;
-  }
-  return "l:INBOX";
-}
-
-function getMailListCacheKey(
-  tenantId: string,
-  view: { labelIds?: string[]; query?: string },
-  page: number,
-): string {
-  return `${tenantId}:${viewToken(view)}:${page}`;
-}
-
-export function invalidateMailListCacheForTenant(
-  tenantId: string,
-  view?: { labelIds?: string[]; query?: string },
-): void {
-  const prefix = view
-    ? `${tenantId}:${viewToken(view)}:`
-    : `${tenantId}:`;
-  for (const key of Array.from(mailListCache.keys())) {
-    if (key.startsWith(prefix)) mailListCache.delete(key);
-  }
-}
+export { invalidateMailListCacheForTenant } from "./mail-read-model";
 
 export async function getClient() {
   const tenantId = await getSessionTenantId();
@@ -80,25 +52,6 @@ export async function getClient() {
   const accountId = await getAccountIdForTenant(tenantId);
   if (!accountId) return null;
   return { tenantId, accountId, client: corsair.withTenant(tenantId) };
-}
-
-function isRowEnriched(row: { data: Record<string, unknown> }): boolean {
-  const d = row.data;
-  if (typeof d.from === "string" && d.from.trim() !== "") return true;
-  const payload = d.payload as
-    | { headers?: Array<{ name?: string; value?: string }> }
-    | undefined;
-  const headers = payload?.headers;
-  if (Array.isArray(headers)) {
-    const hasFrom = headers.some(
-      (h) =>
-        h.name?.toLowerCase() === "from" &&
-        typeof h.value === "string" &&
-        h.value.trim() !== "",
-    );
-    if (hasFrom) return true;
-  }
-  return false;
 }
 
 export function describeError(err: unknown): string {
@@ -229,156 +182,6 @@ async function enrichStubs(
   );
 }
 
-function sortByReceivedDesc(items: MailListItem[]): MailListItem[] {
-  return [...items].sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
-}
-
-function rowsToListItems(
-  rows: Array<{ data: Record<string, unknown> }>,
-): MailListItem[] {
-  const seen = new Set<string>();
-  return rows
-    .map((r) => toListItem(r))
-    .filter((item): item is MailListItem => {
-      if (item.id === "" || seen.has(item.id)) return false;
-      seen.add(item.id);
-      return true;
-    });
-}
-
-type ViewKind = "label" | "query" | "search";
-
-function classifyView(view: {
-  labelIds?: string[];
-  query?: string;
-}): ViewKind {
-  if (view.query) return view.labelIds?.length ? "label" : "search";
-  return "label";
-}
-
-async function resolveCount(
-  accountId: string,
-  client: ReturnType<typeof corsair.withTenant>,
-  view: { labelIds?: string[]; query?: string },
-): Promise<{ count: number | null; degraded: boolean }> {
-  if (classifyView(view) === "search") {
-    console.log(`[mail-debug] resolveCount: search view → count=null`);
-    return { count: null, degraded: false };
-  }
-
-  if (view.labelIds?.length === 1) {
-    const labelId = view.labelIds[0];
-    if (!labelId) {
-      const dbCount = await countByLabel(accountId, view.labelIds);
-      console.log(`[mail-debug] resolveCount: empty labelId → dbCount=${dbCount}`);
-      return { count: dbCount, degraded: false };
-    }
-    try {
-      const labels = await client.gmail.db.labels.list();
-      const row = labels.find(
-        (l) => (l.data as Record<string, unknown>).id === labelId,
-      );
-      const labelTotal = row
-        ? ((row.data as Record<string, unknown>).messagesTotal as
-            | number
-            | undefined)
-        : undefined;
-      if (typeof labelTotal === "number" && labelTotal >= 0) {
-        console.log(
-          `[mail-debug] resolveCount: DB cache hit for ${labelId} → ${labelTotal}`,
-        );
-        return { count: labelTotal, degraded: false };
-      }
-      console.log(
-        `[mail-debug] resolveCount: DB row for ${labelId} missing messagesTotal, falling back to labels.get`,
-      );
-    } catch (err) {
-      console.log(`[mail-debug] resolveCount: DB labels.list failed: ${describeError(err)}`);
-    }
-
-    try {
-      const cachedTotal = await getCachedLabelCount(accountId, labelId, async () => {
-        const label = await client.gmail.api.labels.get({ id: labelId });
-        const apiTotal = (label as Record<string, unknown>).messagesTotal as
-          | number
-          | undefined;
-        const apiUnread = (label as Record<string, unknown>).messagesUnread as
-          | number
-          | undefined;
-        console.log(
-          `[mail-debug] resolveCount: labels.get(${labelId}) → total=${apiTotal} unread=${apiUnread}`,
-        );
-        return typeof apiTotal === "number" && apiTotal >= 0 ? apiTotal : null;
-      });
-      if (typeof cachedTotal === "number") {
-        return { count: cachedTotal, degraded: false };
-      }
-    } catch (err) {
-      console.log(`[mail-debug] resolveCount: labels.get(${labelId}) failed: ${describeError(err)}`);
-    }
-  }
-
-  const dbCount = view.labelIds?.length
-    ? await countByLabel(accountId, view.labelIds)
-    : await client.gmail.db.messages.count();
-  console.log(`[mail-debug] resolveCount: dbCount fallback = ${dbCount}`);
-  return { count: dbCount, degraded: false };
-}
-
-function computeCacheState(
-  count: number | null,
-  dbCount: number,
-): { cacheState: "full" | "partial" | "empty"; coverage: number } {
-  if (dbCount === 0) return { cacheState: "empty", coverage: 0 };
-  if (count == null || count === 0) {
-    return { cacheState: "full", coverage: 1 };
-  }
-  if (dbCount >= count) return { cacheState: "full", coverage: 1 };
-  return { cacheState: "partial", coverage: dbCount / count };
-}
-
-function buildPagination(
-  page: number,
-  count: number | null,
-): {
-  page: number;
-  totalPages: number | null;
-  hasMore: boolean;
-  hasPrev: boolean;
-} {
-  if (count == null) {
-    return {
-      page,
-      totalPages: null,
-      hasMore: false,
-      hasPrev: page > 1,
-    };
-  }
-  const totalPages = Math.max(1, Math.ceil(count / PAGE_SIZE));
-  const clampedPage = Math.min(Math.max(1, page), totalPages);
-  return {
-    page: clampedPage,
-    totalPages,
-    hasMore: clampedPage < totalPages,
-    hasPrev: clampedPage > 1,
-  };
-}
-
-function emptyResponse(): MailListResponse {
-  return {
-    items: [],
-    count: 0,
-    page: 1,
-    totalPages: 1,
-    hasMore: false,
-    hasPrev: false,
-    cacheState: "empty",
-    coverage: 0,
-    source: "cache",
-    degraded: false,
-  };
-}
-
 export interface GetMailListOpts {
   page?: number;
   labelIds?: string[];
@@ -405,10 +208,8 @@ export async function getMailList(
   const requestedPage = Math.max(1, Math.floor(finitePage));
 
   const cacheKey = getMailListCacheKey(tenantId, view, requestedPage);
-  const cached = mailListCache.get(cacheKey);
-  if (cached && Date.now() - cached.at < MAIL_LIST_CACHE_TTL) {
-    return cached.data;
-  }
+  const cached = checkMailListCache(cacheKey);
+  if (cached) return cached;
 
   console.log(
     `[mail-debug] getMailList view=${JSON.stringify(view)} page=${requestedPage} → isSearch=${isSearchView} isFiltered=${isFilteredLabel} isQuery=${isQueryView}`,
@@ -429,13 +230,8 @@ export async function getMailList(
     );
   }
 
-  mailListCache.set(cacheKey, { data: result, at: Date.now() });
+  setMailListCache(cacheKey, result);
   return result;
-}
-
-function isFilteredLabelView(labelIds: string[] | undefined): boolean {
-  if (!labelIds || labelIds.length === 0) return false;
-  return labelIds.length > 1 || labelIds[0] !== INBOX_LABEL;
 }
 
 async function getMailListFromSearch(
@@ -563,9 +359,8 @@ async function getMailListFromFilteredView(
 
   const { count, degraded } = await resolveCount(accountId, client, view);
   const dbCount = await countByLabel(accountId, labelIds);
-  const { cacheState, coverage } = computeCacheState(count, dbCount);
-  const { page: clampedPage, totalPages, hasMore, hasPrev } =
-    buildPagination(page, count);
+  const { page: clampedPage, totalPages, hasMore, hasPrev, cacheState, coverage } =
+    buildPageMeta(page, count, dbCount);
 
   return {
     items,
@@ -632,9 +427,8 @@ async function getMailListFromInbox(
 
   const { count, degraded } = await resolveCount(accountId, client, view);
   const dbCount = await countByLabel(accountId, [INBOX_LABEL]);
-  const { cacheState, coverage } = computeCacheState(count, dbCount);
-  const { page: clampedPage, totalPages, hasMore, hasPrev } =
-    buildPagination(page, count);
+  const { page: clampedPage, totalPages, hasMore, hasPrev, cacheState, coverage } =
+    buildPageMeta(page, count, dbCount);
 
   return {
     items,
@@ -678,9 +472,8 @@ async function getMailListFromGmailToken(
 
   const { count, degraded } = await resolveCount(accountId, client, view);
   const dbCount = await countByLabel(accountId, [INBOX_LABEL]);
-  const { cacheState, coverage } = computeCacheState(count, dbCount);
-  const { page: clampedPage, totalPages, hasMore, hasPrev } =
-    buildPagination(page, count);
+  const { page: clampedPage, totalPages, hasMore, hasPrev, cacheState, coverage } =
+    buildPageMeta(page, count, dbCount);
 
   return {
     items,
@@ -826,10 +619,6 @@ export async function getMailPageData(
         : undefined;
   }
 
-  console.log(
-    `[mail-debug] getMailPageData view=${view} page=${page} → labelIds=${JSON.stringify(labelIds)} query=${viewQuery ?? "—"}`,
-  );
-
   const { getProfile, getLabels } = await import("./mail-profile");
 
   const [list, profile, labels] = await Promise.all([
@@ -841,10 +630,6 @@ export async function getMailPageData(
     getProfile(),
     getLabels(),
   ]);
-
-  console.log(
-    `[mail-debug] getMailPageData result: count=${list.count ?? "null"} items=${list.items.length} cacheState=${list.cacheState} coverage=${list.coverage.toFixed(2)} totalPages=${list.totalPages ?? "null"}`,
-  );
 
   return { tenantId, gmailConnected: true, view, list, profile, labels };
 }
