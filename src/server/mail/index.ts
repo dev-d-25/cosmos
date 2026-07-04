@@ -8,6 +8,7 @@ export type { SendEmailParams } from "./mail-send";
 export { createDraft, updateDraft, deleteDraft } from "./mail-drafts";
 export { getProfile, getLabels } from "./mail-profile";
 export { clearMailCache } from "./mail-sync";
+export { describeError } from "./mail-list";
 export { applyThreadAction, markAsRead } from "./thread-actions";
 export type { ThreadActionName } from "./thread-actions";
 export type {
