@@ -8,7 +8,7 @@ export async function clearMailCache(): Promise<{
 }> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCacheForTenant(ctx.tenantId);
+  await invalidateMailListCacheForTenant(ctx.tenantId);
 
   const allMessages = await ctx.client.gmail.db.messages.list({ limit: 10000 });
   let deletedMessages = 0;

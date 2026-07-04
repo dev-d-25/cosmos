@@ -32,7 +32,7 @@ export async function applyThreadAction(
 ): Promise<{ marked?: number } | void> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCacheForTenant(ctx.tenantId);
+  await invalidateMailListCacheForTenant(ctx.tenantId);
   const fn = MUTATIONS[action];
   if (!fn) throw new Error(`Unknown thread action: ${action}`);
   await fn({ client: ctx.client, ...input });

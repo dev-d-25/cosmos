@@ -30,7 +30,7 @@ export async function sendEmail(
 ): Promise<{ id: string; threadId: string }> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCacheForTenant(ctx.tenantId);
+  await invalidateMailListCacheForTenant(ctx.tenantId);
 
   const { getProfile } = await import("./mail-profile");
   const profile = await getProfile();
@@ -81,7 +81,7 @@ export async function replyToMessage(
 ): Promise<{ id: string; threadId: string }> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCacheForTenant(ctx.tenantId);
+  await invalidateMailListCacheForTenant(ctx.tenantId);
 
   const original = await ctx.client.gmail.api.messages.get({
     id: messageId,
@@ -184,7 +184,7 @@ export async function forwardMessage(
 ): Promise<{ id: string; threadId: string }> {
   const ctx = await getClient();
   if (!ctx) throw new Error("Not authenticated");
-  invalidateMailListCacheForTenant(ctx.tenantId);
+  await invalidateMailListCacheForTenant(ctx.tenantId);
 
   const original = await ctx.client.gmail.api.messages.get({
     id: messageId,

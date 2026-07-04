@@ -55,18 +55,6 @@ export async function getClient() {
 }
 
 export function describeError(err: unknown): string {
-  if (err && typeof err === "object") {
-    const e = err as {
-      status?: number;
-      code?: number | string;
-      message?: string;
-    };
-    if (e.status) return `HTTP ${e.status}`;
-    if (e.code != null) return `code ${e.code}`;
-    if (e.message) return e.message.slice(0, 200);
-  }
-  return String(err).slice(0, 200);
-}
 
 async function enrichStubs(
   accountId: string,
@@ -547,7 +535,7 @@ export async function refreshInbox(
   if (!ctx) return { synced: 0 };
   const { tenantId, accountId, client } = ctx;
 
-  invalidateMailListCacheForTenant(tenantId);
+  await invalidateMailListCacheForTenant(tenantId);
 
   const viewDef = MAIL_LABELS.find((l) => l.id === viewId) ?? MAIL_LABELS[0];
   let labelIds: string[] | undefined;
@@ -584,7 +572,7 @@ export async function refreshInbox(
     console.log(`[mail] refreshInbox: labels.list failed: ${describeError(err)}`);
   }
 
-  invalidateMailListCacheForTenant(tenantId);
+  await invalidateMailListCacheForTenant(tenantId);
 
   return { synced: syncResult.fetched };
 }
