@@ -363,6 +363,81 @@ export function MailInterface({
     setShortcutsOpen,
   });
 
+  // ─── PROTOTYPE: variant param ──────────────────────────────────────────
+  const variant = searchParams.get("variant");
+
+  // Common props to pass to all variants
+  const variantProps = {
+    syncedState,
+    profile,
+    onRefresh,
+    onClearCache: () => clearCacheMutation.mutate(),
+    isRefreshing: refreshMutation.isPending,
+    isClearing: clearCacheMutation.isPending,
+    onSearchOpen: () => router.push("/search"),
+    shortcutsOpen,
+    onShortcutsOpenChange: setShortcutsOpen,
+    labels,
+    activeLabel,
+    onCompose: () => setComposeOpen(true),
+    items,
+    selectedId,
+    onSelect,
+    onOpen,
+    page: pageFromResponse,
+    totalPages,
+    hasMore,
+    hasPrev,
+    count,
+    cacheState,
+    coverage,
+    degraded,
+    source,
+    onPageChange,
+    loading: threadsQuery.isFetching,
+    isInitialLoading: threadsQuery.isLoading,
+    labelName,
+    searchQuery: searchQuery || undefined,
+    onClearSearch: () => setSearchQuery(""),
+    gmailConnected,
+    selectedListItem,
+    message: messageQuery.data?.message ?? null,
+    messageSource: messageQuery.data?.source ?? null,
+    messageLoading: messageQuery.isLoading,
+    messageError: messageQuery.error?.message ?? null,
+    onRetryMessage: () => messageQuery.refetch(),
+    onCloseMessage: onClose,
+    onAction: onMailAction,
+    composeOpen,
+    setComposeOpen,
+  };
+
+  if (variant === "A") {
+    return (
+      <>
+        <PrototypeSwitcher />
+        <VariantA {...variantProps} />
+      </>
+    );
+  }
+  if (variant === "B") {
+    return (
+      <>
+        <PrototypeSwitcher />
+        <VariantB {...variantProps} />
+      </>
+    );
+  }
+  if (variant === "C") {
+    return (
+      <>
+        <PrototypeSwitcher />
+        <VariantC {...variantProps} />
+      </>
+    );
+  }
+
+  // ─── Default: original layout (no variant) ─────────────────────────────
   return (
     <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
       <MailTopNav
@@ -440,6 +515,9 @@ export function MailInterface({
         open={composeOpen}
         onOpenChange={setComposeOpen}
       />
+
+      {/* PROTOTYPE: variant switcher */}
+      <PrototypeSwitcher />
     </div>
   );
 }
@@ -454,6 +532,12 @@ import { useState } from "react";
 function useStateShim<T>(initial: T): [T, (v: T) => void] {
   return useState<T>(initial);
 }
+
+// ─── PROTOTYPE: Variant switching ───────────────────────────────────────────
+import { PrototypeSwitcher } from "@/components/prototype/variant-switcher";
+import { VariantA } from "@/components/prototype/variant-a";
+import { VariantB } from "@/components/prototype/variant-b";
+import { VariantC } from "@/components/prototype/variant-c";
 
 function useGlobalKeydown(handler: (e: KeyboardEvent) => void) {
   useEffect(() => {
