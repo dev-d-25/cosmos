@@ -1,4 +1,14 @@
-export { getMailList, refreshInbox, getMailPageData } from "./mail-list";
+export { getMailList, getMailPageData } from "./mail-list";
+export { refreshInbox } from "./mail-background-sync";
+export { assemblePage } from "./mail-page-assembly";
+export type { AssembleContext, AssembleOpts } from "./mail-page-assembly";
+export { enrichStubs, backfillWindow } from "./mail-ingestion";
+export {
+  getMailListCacheKey,
+  checkMailListCache,
+  setMailListCache,
+  invalidateMailListCacheForTenant,
+} from "./mail-page-cache";
 export { getMessage, prefetchFullBody, getAttachmentContent } from "./mail-messages";
 export type { AttachmentResult } from "./mail-messages";
 export { sendEmail, replyToMessage, forwardMessage } from "./mail-send";

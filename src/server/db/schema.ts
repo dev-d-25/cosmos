@@ -142,6 +142,25 @@ export const corsairEntities = pgTable(
   ],
 );
 
+export const mailSyncState = pgTable(
+  "mail_sync_state",
+  {
+    id: text("id").primaryKey(),
+    accountId: text("account_id")
+      .notNull()
+      .references(() => corsairAccounts.id),
+    viewKey: text("view_key").notNull(),
+    nextPageToken: text("next_page_token"),
+    windowIndex: integer("window_index").notNull().default(0),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    uniqueIndex("idx_mail_sync_state_account_view").on(t.accountId, t.viewKey),
+  ],
+);
+
 export const corsairEvents = pgTable("corsair_events", {
   id: text("id").primaryKey(),
   createdAt: timestamp("created_at", { withTimezone: true })

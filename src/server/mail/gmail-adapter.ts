@@ -133,6 +133,63 @@ export async function fetchAttachment(
   return result.value;
 }
 
+export interface GmailListMessage {
+  id?: string;
+  threadId?: string;
+  snippet?: string;
+  historyId?: string;
+  internalDate?: string;
+  labelIds?: string[];
+  payload?: { headers?: Array<{ name?: string; value?: string }> };
+}
+
+export interface GmailListResult {
+  messages: GmailListMessage[];
+  nextPageToken?: string | null;
+}
+
+/**
+ * Single `messages.list(format=metadata, maxResults, token?)` call that returns
+ * id + Subject/From/To/Date for up to 500 messages at once. Replaces the old
+ * per-message `messages.get` storm that `enrichStubs` did. Returns the raw
+ * `nextPageToken` so callers can persist it and walk the mailbox on demand.
+ *
+ * Uses the shared `gmailFetch` (401-refresh + 429-retry), so it is serverless
+ * safe and never blocks on a background queue.
+ */
+export async function listMessages(
+  client: ReturnType<typeof corsair.withTenant>,
+  view: { labelIds?: string[]; query?: string },
+  maxResults: number,
+  token?: string | null,
+): Promise<GmailListResult> {
+  const params = new URLSearchParams();
+  params.set("maxResults", String(Math.min(Math.max(1, maxResults), 500)));
+  if (token) params.set("pageToken", token);
+  if (view.labelIds?.length) {
+    for (const id of view.labelIds) params.append("labelIds", id);
+  }
+  if (view.query) {
+    params.set("q", view.query);
+    params.set("includeSpamTrash", "true");
+  }
+  params.set("format", "metadata");
+  for (const h of ["Subject", "From", "To", "Date"]) {
+    params.append("metadataHeaders", h);
+  }
+
+  const result = await gmailFetch<GmailListResult>(
+    client,
+    `messages?${params.toString()}`,
+  );
+  if (!result.ok) throw result.error;
+
+  return {
+    messages: result.value.messages ?? [],
+    nextPageToken: result.value.nextPageToken ?? null,
+  };
+}
+
 export async function resolveWebhookTenant(
   body: string | Record<string, unknown>,
   fallbackTenant: string,

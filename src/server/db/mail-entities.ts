@@ -24,7 +24,12 @@ import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "./index";
-import { corsairAccounts, corsairEntities, corsairIntegrations } from "./schema";
+import {
+  corsairAccounts,
+  corsairEntities,
+  corsairIntegrations,
+  mailSyncState,
+} from "./schema";
 
 const MESSAGE_ENTITY_TYPE = "messages";
 const MESSAGE_VERSION = "v1" as const;
@@ -213,6 +218,74 @@ export async function getAccountIdForTenant(
     )
     .limit(1);
   return rows[0]?.accountId ?? null;
+}
+
+// ─── Sync window state (per account + view) ────────────────
+//
+// Persists the Gmail `nextPageToken` so on-demand backfill can walk the
+// mailbox window-by-window without re-listing from the top. Keyed by
+// (accountId, viewKey) — never by a falsy tenantId (which would collapse
+// every tenant's token into one row).
+
+export interface MailSyncState {
+  accountId: string;
+  viewKey: string;
+  nextPageToken: string | null;
+  windowIndex: number;
+  updatedAt: Date;
+}
+
+export async function getMailSyncState(
+  accountId: string,
+  viewKey: string,
+): Promise<MailSyncState | null> {
+  if (!accountId || !viewKey) return null;
+  const rows = await db
+    .select()
+    .from(mailSyncState)
+    .where(
+      and(
+        eq(mailSyncState.accountId, accountId),
+        eq(mailSyncState.viewKey, viewKey),
+      ),
+    )
+    .limit(1);
+  const r = rows[0];
+  if (!r) return null;
+  return {
+    accountId: r.accountId,
+    viewKey: r.viewKey,
+    nextPageToken: r.nextPageToken ?? null,
+    windowIndex: r.windowIndex,
+    updatedAt: r.updatedAt,
+  };
+}
+
+export async function upsertMailSyncState(
+  accountId: string,
+  viewKey: string,
+  nextPageToken: string | null,
+  windowIndex: number,
+): Promise<void> {
+  if (!accountId || !viewKey) return;
+  await db
+    .insert(mailSyncState)
+    .values({
+      id: randomUUID(),
+      accountId,
+      viewKey,
+      nextPageToken: nextPageToken ?? null,
+      windowIndex,
+      updatedAt: new Date(),
+    })
+    .onConflictDoUpdate({
+      target: [mailSyncState.accountId, mailSyncState.viewKey],
+      set: {
+        nextPageToken: sql`excluded.next_page_token`,
+        windowIndex: sql`excluded.window_index`,
+        updatedAt: sql`excluded.updated_at`,
+      },
+    });
 }
 
 function parseRow(row: typeof corsairEntities.$inferSelect): MailEntityRow {

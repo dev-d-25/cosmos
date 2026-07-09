@@ -9,7 +9,10 @@ import { StarIcon } from "lucide-react";
 import type { MailListItem } from "@/server/mail/schemas";
 import { formatReceived } from "@/lib/mail/format";
 import { isReadLocally } from "@/lib/read-emails";
-import { usePrefetchFullBody } from "@/hooks/use-mail";
+// Prefetch full-body wiring is disabled: on-demand window backfill is the only
+// sync path now (see plan). Keep the IntersectionObserver plumbing but make
+// onPrefetch a no-op so rows don't fire the removed usePrefetchFullBody.
+// import { usePrefetchFullBody } from "@/hooks/use-mail";
 
 const PREFETCH_DWELL_MS = 200;
 const PREFETCH_VISIBLE_RATIO = 0.5;
@@ -182,36 +185,16 @@ export function MailList({
   searchQuery?: string;
   onClearSearch?: () => void;
 }) {
-  const prefetchMutation = usePrefetchFullBody();
-  // In-flight ids: don't fire the same id twice concurrently.
-  const inflightRef = useRef<Set<string>>(new Set());
-  // Failed ids for this page-load: don't retry until the user navigates
-  // or the cache is cleared. Without this, a 401 from an expired token
-  // (or a transient Gmail error) hammers the server on every
-  // IntersectionObserver cycle for visible rows.
-  const failedRef = useRef<Set<string>>(new Set());
+  // Prefetch is disabled (on-demand backfill only). onPrefetch remains a no-op
+  // so the IntersectionObserver plumbing still works without firing Gmail.
+  // const prefetchMutation = usePrefetchFullBody();
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const onPrefetch = useCallback(
-    (id: string) => {
-      // Skip ids that already failed this cycle. The retry would hit the
-      // same 401 / rate-limit error and waste a server round-trip.
-      if (failedRef.current.has(id)) return;
-      if (inflightRef.current.has(id)) return;
-      inflightRef.current.add(id);
-      prefetchMutation.mutate(id, {
-        onError: () => {
-          // Mark failed so we don't keep retrying. The user can clear
-          // the cache to reset, or the next page navigation will get a
-          // fresh row set with empty failedRef.
-          failedRef.current.add(id);
-        },
-        onSettled: () => {
-          inflightRef.current.delete(id);
-        },
-      });
+    (_id: string) => {
+      // No-op: full-body prefetch disabled in favour of on-demand backfill.
     },
-    [prefetchMutation],
+    [],
   );
 
   useEffect(() => {

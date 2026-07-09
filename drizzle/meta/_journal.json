@@ -16,11 +16,18 @@
       "tag": "0001_fearless_wilson_fisk",
       "breakpoints": true
     },
-    {
+      {
       "idx": 2,
       "version": "7",
       "when": 1781755804471,
       "tag": "0002_nappy_mongoose",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1783490256000,
+      "tag": "0003_window_backfill",
       "breakpoints": true
     }
   ]

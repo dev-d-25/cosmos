@@ -14,6 +14,16 @@ import { z } from "zod";
  */
 export const PAGE_SIZE = 25;
 
+/**
+ * Upper bound on how many 500-message windows we will chain per request when
+ * backfilling on demand. 500 / PAGE_SIZE = 20 pages per window, so
+ * MAX_WINDOWS * 20 = 100 pages of ceiling (2500 messages). This is the only
+ * remaining guard against unbounded Gmail walking — the old unbounded
+ * `syncDepth = page * 25` fan-out is gone.
+ */
+export const MAX_WINDOWS = 5;
+export const MAX_PAGE = MAX_WINDOWS * 20; // 100
+
 export const MailAttachmentSchema = z.object({
   filename: z.string(),
   mimeType: z.string(),
@@ -110,7 +120,7 @@ export const MailListResponseSchema = z.object({
  * accepted from the client — PAGE_SIZE is the single constant.
  */
 export const MailThreadsQuerySchema = z.object({
-  page: z.coerce.number().int().min(1).default(1),
+  page: z.coerce.number().int().min(1).max(MAX_PAGE).default(1),
   token: z.string().optional(),
   labelIds: z.array(z.string()).optional(),
   q: z.string().optional(),

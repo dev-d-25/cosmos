@@ -116,17 +116,24 @@ export const mailKeys = {
   profile: () => [...mailKeys.all, "profile"] as const,
 };
 
-async function fetchPrefetchMessage(id: string): Promise<{ id: string; ok: boolean; error?: string }> {
-  const res = await fetch(`/api/mail/messages/${encodeURIComponent(id)}/prefetch`, {
-    method: "POST",
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error ?? `Prefetch failed (${res.status})`);
-  }
-  return res.json();
-}
+// ─── Prefetch full body (commented out) ────────────────────────────────────
+//
+// On-demand window backfill replaced eager prefetch: a message's full body is
+// fetched only on open (see /api/mail/messages/[id]). The prefetch endpoint is
+// kept (it still writes the full body to the DB) but the client wiring is
+// disabled for now — re-enableable later without re-architecting.
+//
+// async function fetchPrefetchMessage(id: string): Promise<{ id: string; ok: boolean; error?: string }> {
+//   const res = await fetch(`/api/mail/messages/${encodeURIComponent(id)}/prefetch`, {
+//     method: "POST",
+//     cache: "no-store",
+//   });
+//   if (!res.ok) {
+//     const body = await res.json().catch(() => ({}));
+//     throw new Error(body.error ?? `Prefetch failed (${res.status})`);
+//   }
+//   return res.json();
+// }
 
 // ─── Hooks ─────────────────────────────────────────────────────────────────────
 
@@ -194,14 +201,15 @@ export function useRefreshInbox() {
  * Fire-and-forget prefetch of a message's full body. Writes to the local
  * DB so the next useMailMessage(id) call hits cache instead of Gmail.
  *
- * Caller is responsible for deduplicating per id (use a Set in the parent
- * component — TanStack useMutation does not dedupe by arg).
+ * DISABLED: on-demand window backfill is the only path now (see plan).
+ * The prefetch endpoint remains available server-side; re-enable by
+ * uncommenting and wiring `onPrefetchRef` in the mail client.
  */
-export function usePrefetchFullBody() {
-  return useMutation({
-    mutationFn: fetchPrefetchMessage,
-  });
-}
+// export function usePrefetchFullBody() {
+//   return useMutation({
+//     mutationFn: fetchPrefetchMessage,
+//   });
+// }
 
 export function useClearMailCache() {
   const queryClient = useQueryClient();

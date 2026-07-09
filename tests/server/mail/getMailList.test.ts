@@ -83,6 +83,16 @@ vi.mock("@/server/db/mail-entities", () => ({
   countByLabel: mockCountByLabel,
   upsertManyByEntityIds: mockUpsertManyByEntityIds,
   getAccountIdForTenant: mockGetAccountIdForTenant,
+  // No persisted window cursor by default → on-demand backfill breaks out
+  // immediately (no nextPageToken) instead of hitting Gmail in unit tests.
+  getMailSyncState: vi.fn(async () => ({
+    accountId: "account_1",
+    viewKey: "l:INBOX",
+    nextPageToken: null,
+    windowIndex: 0,
+    updatedAt: new Date(),
+  })),
+  upsertMailSyncState: vi.fn(async () => {}),
 }));
 
 function makeRow(id: string, msAgo: number): Row {
