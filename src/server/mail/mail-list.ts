@@ -10,10 +10,9 @@ import {
 import type {
   MailListResponse,
   MailPageData,
-  MailProfile,
 } from "./schemas";
 import { MAX_PAGE, MAX_WINDOWS } from "./schemas";
-import { MAIL_LABELS } from "@/lib/mail/labels";
+import { resolveViewParams } from "@/lib/mail/labels";
 import {
   emptyResponse,
 } from "./mail-read-model";
@@ -82,8 +81,8 @@ export async function getMailList(
   // DB cheaply (no Gmail call), so the cost is negligible.
   if (result.items.length > 0) {
     if (result.source === "syncing") {
-      // A backfill ran and may have filled neighbouring pages too.
-      invalidateMailListCacheForTenant(tenantId);
+      // A backfill ran and may have filled neighbouring pages of this view.
+      invalidateMailListCacheForTenant(tenantId, view);
     }
     setMailListCache(cacheKey, result);
   }
@@ -119,13 +118,18 @@ async function assemblePageWithBackfill(
   let windows = 0;
 
   while (windows < MAX_WINDOWS) {
-    const state = await getMailSyncState(ctx.accountId, viewKey);
+    // Degrade gracefully if mail_sync_state isn't migrated yet: treat as no
+    // cursor and fall through to a live backfill instead of 500-ing the page.
+    let state: import("@/server/db/mail-entities").MailSyncState | null = null;
+    try {
+      state = await getMailSyncState(ctx.accountId, viewKey);
+    } catch {
+      state = null;
+    }
     const token = state?.nextPageToken ?? null;
 
     // No token means we've already walked to the end of the mailbox.
     if (state && !token) break;
-    // Ceiling: don't chain more windows than MAX_WINDOWS per logical walk.
-    if ((state?.windowIndex ?? 0) + 1 > MAX_WINDOWS) break;
 
     let nextToken: string | null;
     try {
@@ -136,12 +140,17 @@ async function assemblePageWithBackfill(
       break;
     }
 
-    await upsertMailSyncState(
-      ctx.accountId,
-      viewKey,
-      nextToken,
-      (state?.windowIndex ?? 0) + 1,
-    );
+    try {
+      await upsertMailSyncState(
+        ctx.accountId,
+        viewKey,
+        nextToken,
+        (state?.windowIndex ?? 0) + 1,
+      );
+    } catch {
+      // Non-fatal: cursor persistence failed, but backfillWindow already
+      // upserted the rows. Skip persisting the cursor rather than failing.
+    }
     windows++;
 
     result = await assemblePage(ctx, view, requestedPage, { pageToken });
@@ -170,20 +179,9 @@ export async function getMailPageData(
   const view = opts.view ?? "INBOX";
   const page = Math.max(1, Math.floor(opts.page ?? 1));
 
-  const labelDef = MAIL_LABELS.find((l) => l.id === view);
-  let labelIds: string[] | undefined;
-  let viewQuery: string | undefined;
-  if (labelDef?.gmailQuery) {
-    viewQuery = labelDef.gmailQuery;
-    labelIds = undefined;
-  } else if (labelDef?.gmailLabel) {
-    labelIds = [labelDef.gmailLabel];
-  } else {
-    labelIds =
-      view.startsWith("CATEGORY_") || view.startsWith("Label_")
-        ? [view]
-        : undefined;
-  }
+  const resolved = resolveViewParams(view);
+  const labelIds = resolved.labelIds;
+  const viewQuery = resolved.query;
 
   const { getProfile, getLabels } = await import("./mail-profile");
 

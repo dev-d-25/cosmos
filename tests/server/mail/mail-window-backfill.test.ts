@@ -204,18 +204,48 @@ describe("window backfill invariants", () => {
     expect(r2.items).toHaveLength(25);
   });
 
-  it("caps on-demand chaining at MAX_WINDOWS (no unbounded fan-out)", async () => {
+  it("caps on-demand chaining at MAX_WINDOWS per request (no unbounded fan-out)", async () => {
     const { getMailList } = await import("@/server/mail");
     const { MAX_WINDOWS } = await import("@/server/mail/schemas");
 
-    // Pretend we've already walked MAX_WINDOWS windows.
-    syncState = { nextPageToken: String(MAX_WINDOWS), windowIndex: MAX_WINDOWS };
+    // Infinite mailbox: every window returns a nextPageToken, so without the
+    // per-request cap the loop would never stop. Use a numeric window counter
+    // so each window fetches distinct, valid rows.
+    let wc = 0;
+    mockFetch.mockImplementation(async () => {
+      const start = wc * 500;
+      wc++;
+      listCallCount++;
+      const messages = Array.from({ length: 500 }, (_, i) => ({
+        id: `m_${start + i}`,
+        threadId: `t_${start + i}`,
+        internalDate: String(Date.now() - (start + i) * 1000),
+        labelIds: ["INBOX"],
+        payload: {
+          headers: [
+            { name: "Subject", value: `Subject ${start + i}` },
+            { name: "From", value: `from${start + i}@x.com` },
+            { name: "To", value: "me@x.com" },
+            { name: "Date", value: new Date().toUTCString() },
+          ],
+        },
+      }));
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ messages, nextPageToken: String(wc) }),
+      };
+    });
 
-    const r = await getMailList({ page: 99 });
-    // Loop breaks immediately: no backfill, empty page.
-    expect(listCallCount).toBe(0);
+    // An "infinite" mailbox: without the per-request cap the loop would never
+    // stop. With MAX_WINDOWS=5 (2500 messages) it must stop after exactly 5
+    // backfills even though more mail exists. MAX_PAGE clamps the request to
+    // 100, which is exactly reachable within the cap, so the page is served.
+    const r = await getMailList({ page: 100 });
+    expect(listCallCount).toBe(MAX_WINDOWS);
     expect(getUrls).toHaveLength(0);
-    expect(r.items).toHaveLength(0);
+    expect(r.items).toHaveLength(25);
+    expect(r.page).toBe(100);
   });
 
   it("pages 1–20 read from DB with no Gmail call (window 1 only)", async () => {

@@ -43,6 +43,27 @@ export function getGmailParamsForView(view: string): { labelIds?: string[]; quer
   return {};
 }
 
+/**
+ * Canonical UI-view-id → Gmail params resolver, shared by the list path
+ * (getMailPageData) and the refresh path (refreshInbox) so they always agree.
+ *
+ * Unlike getGmailParamsForView, this handles dynamic `CATEGORY_*` / `Label_*`
+ * ids and falls back to INBOX for unknown ids — so refreshing a custom/user
+ * label resolves the same Gmail label the list renders.
+ */
+export function resolveViewParams(viewId: string): {
+  labelIds?: string[];
+  query?: string;
+} {
+  const def = MAIL_LABELS.find((l) => l.id === viewId);
+  if (def?.gmailQuery) return { query: def.gmailQuery };
+  if (def?.gmailLabel) return { labelIds: [def.gmailLabel] };
+  if (viewId.startsWith("CATEGORY_") || viewId.startsWith("Label_")) {
+    return { labelIds: [viewId] };
+  }
+  return { labelIds: ["INBOX"] };
+}
+
 export function getLabelById(id: string): LabelDef | undefined {
   return MAIL_LABELS.find((l) => l.id === id);
 }

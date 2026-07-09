@@ -7,28 +7,9 @@ import { backfillWindow } from "./mail-ingestion";
 import {
   upsertMailSyncState,
 } from "@/server/db/mail-entities";
-import { MAIL_LABELS } from "@/lib/mail/labels";
+import { resolveViewParams } from "@/lib/mail/labels";
 import { viewKeyFor } from "./mail-read-model";
 import { describeError } from "./mail-utils";
-
-const INBOX_LABEL = "INBOX";
-
-/**
- * Resolve the gmail api params (labelIds / query) for a UI view id.
- * Mirrors the resolver used by getMailPageData so refresh and list agree.
- */
-function viewParamsForViewId(viewId: string): {
-  labelIds?: string[];
-  query?: string;
-} {
-  const viewDef = MAIL_LABELS.find((l) => l.id === viewId) ?? MAIL_LABELS[0];
-  if (viewDef?.gmailQuery) return { query: viewDef.gmailQuery };
-  if (viewDef?.gmailLabel) return { labelIds: [viewDef.gmailLabel] };
-  if (viewId.startsWith("CATEGORY_") || viewId.startsWith("Label_")) {
-    return { labelIds: [viewId] };
-  }
-  return { labelIds: [INBOX_LABEL] };
-}
 
 export async function refreshInbox(
   viewId: string = "INBOX",
@@ -40,7 +21,7 @@ export async function refreshInbox(
 
   await invalidateMailListCacheForTenant(tenantId);
 
-  const view = viewParamsForViewId(viewId);
+  const view = resolveViewParams(viewId);
   const viewKey = viewKeyFor(view);
 
   if (view.labelIds) {
