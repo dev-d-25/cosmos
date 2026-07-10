@@ -44,6 +44,7 @@ import {
 import { markAsReadLocally } from "@/lib/read-emails";
 import type { MailSyncedState as SyncedState } from "@/types/mail";
 import { getGmailParamsForView, MAIL_LABELS } from "@/lib/mail/labels";
+import { prefixSubject } from "@/lib/mail/format";
 
 /**
  * Parse a `?page` query value into a positive integer. Returns 1 for
@@ -277,29 +278,28 @@ export function MailInterface({
 
   const selectedListItem = items.find((i) => i.id === selectedId) ?? null;
 
-  const openReply = useCallback(() => {
-    const msg = messageQuery.data?.message;
-    if (!selectedListItem || !msg) return;
-    setComposeMode("reply");
-    setComposeInitial({ to: msg.from || "", subject: msg.subject ? `Re: ${msg.subject}` : "", threadId: selectedListItem.threadId });
-    setComposeOpen(true);
-  }, [selectedListItem, messageQuery.data?.message]);
+  const openCompose = useCallback(
+    (mode: "reply" | "replyAll" | "forward") => {
+      const msg = messageQuery.data?.message;
+      if (!selectedListItem || !msg) return;
+      setComposeMode(mode);
+      setComposeInitial({
+        to: msg.from || "",
+        subject:
+          mode === "forward"
+            ? prefixSubject(msg.subject, "Fwd:")
+            : prefixSubject(msg.subject, "Re:"),
+        body: mode === "forward" ? msg.bodyText || msg.bodyHtml || "" : undefined,
+        threadId: selectedListItem.threadId,
+      });
+      setComposeOpen(true);
+    },
+    [selectedListItem, messageQuery.data?.message],
+  );
 
-  const openReplyAll = useCallback(() => {
-    const msg = messageQuery.data?.message;
-    if (!selectedListItem || !msg) return;
-    setComposeMode("replyAll");
-    setComposeInitial({ to: msg.from || "", subject: msg.subject ? `Re: ${msg.subject}` : "", threadId: selectedListItem.threadId });
-    setComposeOpen(true);
-  }, [selectedListItem, messageQuery.data?.message]);
-
-  const openForward = useCallback(() => {
-    const msg = messageQuery.data?.message;
-    if (!selectedListItem || !msg) return;
-    setComposeMode("forward");
-    setComposeInitial({ subject: msg.subject ? `Fwd: ${msg.subject}` : "", body: msg.bodyText || msg.bodyHtml || "", threadId: selectedListItem.threadId });
-    setComposeOpen(true);
-  }, [selectedListItem, messageQuery.data?.message]);
+  const openReply = useCallback(() => openCompose("reply"), [openCompose]);
+  const openReplyAll = useCallback(() => openCompose("replyAll"), [openCompose]);
+  const openForward = useCallback(() => openCompose("forward"), [openCompose]);
 
   // Listen for CustomEvents from MailViewer toolbar
   useEffect(() => {

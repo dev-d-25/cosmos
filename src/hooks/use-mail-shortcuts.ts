@@ -198,14 +198,17 @@ export function useMailShortcuts({
 
       const currentSelectedId = selectedIdRef.current;
 
-      if (event.key === "j" || event.key === "ArrowDown") {
+      const move = (dir: 1 | -1) => {
         event.preventDefault();
         const isShift = event.shiftKey;
         if (isShift) {
-          // Range select: Shift+Down
+          // Range select: Shift+Down / Shift+Up
           setSelectedId((current) => {
             const idx = current ? currentItems.findIndex((i) => i.id === current) : -1;
-            const nextIdx = Math.min(currentItems.length - 1, idx + 1);
+            const nextIdx =
+              dir === 1
+                ? Math.min(currentItems.length - 1, idx + 1)
+                : Math.max(0, idx - 1);
             const next = currentItems[nextIdx];
             if (!next?.id) return current;
             if (lastShiftIndexRef.current < 0) lastShiftIndexRef.current = idx;
@@ -220,45 +223,25 @@ export function useMailShortcuts({
           lastShiftIndexRef.current = -1;
           setSelectedIds(new Set());
           setSelectedId((current) => {
-            const idx = current ? currentItems.findIndex((i) => i.id === current) : -1;
-            const next = currentItems[Math.min(currentItems.length - 1, idx + 1)];
-            if (next?.id && next.id !== current) markAsReadLocally(next.id);
-            return next?.id ?? current;
-          });
-        }
-      } else if (event.key === "k" || event.key === "ArrowUp") {
-        event.preventDefault();
-        const isShift = event.shiftKey;
-        if (isShift) {
-          // Range select: Shift+Up
-          setSelectedId((current) => {
-            if (!current) {
-              const last = currentItems[currentItems.length - 1];
-              return last?.id ?? null;
+            if (dir === -1 && !current) {
+              return currentItems[currentItems.length - 1]?.id ?? null;
             }
-            const idx = currentItems.findIndex((i) => i.id === current);
-            const nextIdx = Math.max(0, idx - 1);
+            const idx = current ? currentItems.findIndex((i) => i.id === current) : -1;
+            const nextIdx =
+              dir === 1
+                ? Math.min(currentItems.length - 1, idx + 1)
+                : Math.max(0, idx - 1);
             const next = currentItems[nextIdx];
-            if (!next?.id) return current;
-            if (lastShiftIndexRef.current < 0) lastShiftIndexRef.current = idx;
-            const start = Math.min(lastShiftIndexRef.current, nextIdx);
-            const end = Math.max(lastShiftIndexRef.current, nextIdx);
-            const rangeIds = currentItems.slice(start, end + 1).map((i) => i.id);
-            setSelectedIds(new Set(rangeIds));
-            markAsReadLocally(next.id);
-            return next.id;
-          });
-        } else {
-          lastShiftIndexRef.current = -1;
-          setSelectedIds(new Set());
-          setSelectedId((current) => {
-            if (!current) return currentItems[currentItems.length - 1]?.id ?? null;
-            const idx = currentItems.findIndex((i) => i.id === current);
-            const next = currentItems[Math.max(0, idx - 1)];
             if (next?.id && next.id !== current) markAsReadLocally(next.id);
             return next?.id ?? current;
           });
         }
+      };
+
+      if (event.key === "j" || event.key === "ArrowDown") {
+        move(1);
+      } else if (event.key === "k" || event.key === "ArrowUp") {
+        move(-1);
       } else if (event.key === "Enter" || event.key === "o") {
         if (currentSelectedId) {
           event.preventDefault();

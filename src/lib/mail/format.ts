@@ -27,3 +27,10 @@ export function formatReceived(iso: string): string {
   const sameYear = d.getFullYear() === now.getFullYear();
   return sameYear ? `${mon} ${day}` : `${mon} ${day}, ${d.getFullYear()}`;
 }
+
+export function prefixSubject(
+  subject: string | undefined | null,
+  prefix: string,
+): string {
+  return subject ? `${prefix} ${subject}` : "";
+}

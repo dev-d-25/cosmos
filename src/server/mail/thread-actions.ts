@@ -11,6 +11,10 @@ type Mutation = (input: {
   labelId?: string;
 }) => Promise<void>;
 
+function resolveTargetIds(ids?: string[], threadId?: string): string[] {
+  return ids?.length ? ids : threadId ? [threadId] : [];
+}
+
 export type ThreadActionName =
   | "archive" | "trash" | "star" | "unstar"
   | "markRead" | "markUnread"
@@ -18,28 +22,22 @@ export type ThreadActionName =
 
 const MUTATIONS: Record<ThreadActionName, Mutation> = {
   archive:   async ({ client, threadId, ids }) => {
-    const targetIds = ids?.length ? ids : threadId ? [threadId] : [];
-    for (const id of targetIds) await client.gmail.api.threads.modify({ id, removeLabelIds: ["INBOX"] });
+    for (const id of resolveTargetIds(ids, threadId)) await client.gmail.api.threads.modify({ id, removeLabelIds: ["INBOX"] });
   },
   trash:     async ({ client, threadId, ids }) => {
-    const targetIds = ids?.length ? ids : threadId ? [threadId] : [];
-    for (const id of targetIds) await client.gmail.api.threads.trash({ id });
+    for (const id of resolveTargetIds(ids, threadId)) await client.gmail.api.threads.trash({ id });
   },
   star:      async ({ client, threadId, ids }) => {
-    const targetIds = ids?.length ? ids : threadId ? [threadId] : [];
-    for (const id of targetIds) await client.gmail.api.threads.modify({ id, addLabelIds: ["STARRED"] });
+    for (const id of resolveTargetIds(ids, threadId)) await client.gmail.api.threads.modify({ id, addLabelIds: ["STARRED"] });
   },
   unstar:    async ({ client, threadId, ids }) => {
-    const targetIds = ids?.length ? ids : threadId ? [threadId] : [];
-    for (const id of targetIds) await client.gmail.api.threads.modify({ id, removeLabelIds: ["STARRED"] });
+    for (const id of resolveTargetIds(ids, threadId)) await client.gmail.api.threads.modify({ id, removeLabelIds: ["STARRED"] });
   },
   spam:      async ({ client, threadId, ids }) => {
-    const targetIds = ids?.length ? ids : threadId ? [threadId] : [];
-    for (const id of targetIds) await client.gmail.api.threads.modify({ id, addLabelIds: ["SPAM"], removeLabelIds: ["INBOX"] });
+    for (const id of resolveTargetIds(ids, threadId)) await client.gmail.api.threads.modify({ id, addLabelIds: ["SPAM"], removeLabelIds: ["INBOX"] });
   },
   delete:    async ({ client, threadId, ids }) => {
-    const targetIds = ids?.length ? ids : threadId ? [threadId] : [];
-    for (const id of targetIds) await client.gmail.api.threads.delete({ id });
+    for (const id of resolveTargetIds(ids, threadId)) await client.gmail.api.threads.delete({ id });
   },
   markRead:  async ({ client, ids }) => { await client.gmail.api.messages.batchModify({ ids: ids!, removeLabelIds: ["UNREAD"] }); },
   markUnread:async ({ client, ids }) => { await client.gmail.api.messages.batchModify({ ids: ids!, addLabelIds: ["UNREAD"] }); },
