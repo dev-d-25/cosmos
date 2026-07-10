@@ -8,10 +8,10 @@ const mockListByLabel = vi.fn<(accountId: string, labelIds: string[], opts?: { l
 const mockCountByLabel = vi.fn<() => Promise<number>>();
 const mockFindManyByEntityIds = vi.fn<(ids: string[]) => Promise<Row[]>>();
 const mockApiMessagesList = vi.fn();
+const mockApiMessagesGet = vi.fn();
 const mockLabelsList = vi.fn<() => Promise<unknown[]>>();
 const mockGetAccessToken = vi.fn<() => Promise<string | null>>();
 const mockUpsertManyByEntityIds = vi.fn();
-const mockFetch = vi.fn();
 
 const fakeClient = {
   gmail: {
@@ -20,7 +20,7 @@ const fakeClient = {
       labels: { list: mockLabelsList },
     },
     api: {
-      messages: { list: mockApiMessagesList },
+      messages: { list: mockApiMessagesList, get: mockApiMessagesGet },
       labels: { list: mockLabelsList },
     },
     keys: { get_access_token: mockGetAccessToken },
@@ -70,27 +70,25 @@ describe("assemblePage (rows → response + coverage math)", () => {
     mockCountByLabel.mockReset();
     mockFindManyByEntityIds.mockReset();
     mockApiMessagesList.mockReset();
+    mockApiMessagesGet.mockReset();
     mockLabelsList.mockReset();
     mockGetAccessToken.mockReset();
     mockUpsertManyByEntityIds.mockReset();
-    mockFetch.mockReset();
 
     mockGetAccessToken.mockResolvedValue("fake_access_token");
     mockFindManyByEntityIds.mockResolvedValue([]);
     mockUpsertManyByEntityIds.mockImplementation(async (_a: string, items: Array<{ entityId: string }>) =>
       items.map((i) => ({ data: { id: i.entityId } })),
     );
-    vi.stubGlobal("fetch", mockFetch);
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
 
   it("assembles an INBOX page from DB rows (items + sorted by receivedAt desc)", async () => {
     const rows = makeRows(PAGE_SIZE);
-    mockListMessages.mockResolvedValueOnce(rows);
+    mockListByLabel.mockResolvedValueOnce(rows);
     mockLabelsList.mockResolvedValueOnce([{ data: { id: "INBOX", messagesTotal: PAGE_SIZE } }]);
     mockCountByLabel.mockResolvedValueOnce(PAGE_SIZE);
 
@@ -118,7 +116,7 @@ describe("assemblePage (rows → response + coverage math)", () => {
 
   it("computes coverage = dbCount / count when the DB is only partially synced (partial)", async () => {
     const rows = makeRows(10);
-    mockListMessages.mockResolvedValueOnce(rows);
+    mockListByLabel.mockResolvedValueOnce(rows);
     mockLabelsList.mockResolvedValueOnce([{ data: { id: "INBOX", messagesTotal: 100 } }]);
     mockCountByLabel.mockResolvedValueOnce(10);
 
@@ -131,7 +129,7 @@ describe("assemblePage (rows → response + coverage math)", () => {
   });
 
   it("marks cacheState='empty' when there are zero rows in the DB", async () => {
-    mockListMessages.mockResolvedValueOnce([]);
+    mockListByLabel.mockResolvedValueOnce([]);
     mockLabelsList.mockResolvedValueOnce([{ data: { id: "INBOX", messagesTotal: 0 } }]);
     mockCountByLabel.mockResolvedValueOnce(0);
 
@@ -162,20 +160,16 @@ describe("assemblePage (rows → response + coverage math)", () => {
     const apiRows = makeRows(5).map((r) => ({ id: r.data.id }));
     mockApiMessagesList.mockResolvedValueOnce({ messages: apiRows });
     mockFindManyByEntityIds.mockResolvedValue(makeRows(5));
-    mockFetch.mockImplementation(async (url: string) => {
-      const id = /\/messages\/([^/?]+)/.exec(String(url))?.[1] ?? "";
+    mockApiMessagesGet.mockImplementation(async (_opts: { id: string }) => {
+      const id = _opts.id;
       return {
-        ok: true,
-        status: 200,
-        json: async () => ({
-          id,
-          payload: {
-            headers: [
-              { name: "Subject", value: `Subject ${id}` },
-              { name: "From", value: `${id}@example.com` },
-            ],
-          },
-        }),
+        id,
+        payload: {
+          headers: [
+            { name: "Subject", value: `Subject ${id}` },
+            { name: "From", value: `${id}@example.com` },
+          ],
+        },
       };
     });
 

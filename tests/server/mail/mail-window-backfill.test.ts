@@ -10,7 +10,7 @@ const ACCOUNT = "account_wb";
 let dbRows: Row[] = [];
 let syncState: { nextPageToken: string | null; windowIndex: number } | null = null;
 let listCallCount = 0;
-const getUrls: string[] = [];
+let getMessageCallCount = 0;
 
 const mockListMessages = vi.fn<(a: string, o?: { limit?: number; offset?: number }) => Promise<Row[]>>();
 const mockListByLabel = vi.fn<(a: string, l: string[], o?: { limit?: number; offset?: number }) => Promise<Row[]>>();
@@ -21,6 +21,7 @@ const mockGetAccountId = vi.fn<() => Promise<string>>(() => Promise.resolve(ACCO
 const mockGetMailSyncState = vi.fn<() => Promise<unknown>>();
 const mockUpsertMailSyncState = vi.fn<(a: string, vk: string, token: string | null, idx: number) => Promise<void>>();
 const mockApiMessagesList = vi.fn();
+const mockApiMessagesGet = vi.fn();
 const mockApiLabelsList = vi.fn<() => Promise<unknown[]>>();
 const mockDbLabelsList = vi.fn<() => Promise<unknown[]>>();
 const mockGetAccessToken = vi.fn<() => Promise<string | null>>(() => Promise.resolve("tok"));
@@ -35,36 +36,43 @@ const fakeClient = {
       labels: { list: mockDbLabelsList },
     },
     api: {
-      messages: { list: mockApiMessagesList },
+      messages: { list: mockApiMessagesList, get: mockApiMessagesGet },
       labels: { list: mockApiLabelsList },
     },
     keys: { get_access_token: mockGetAccessToken },
   },
 };
 
-// Each Gmail `list` call returns 500 messages for the requested window and a
-// nextPageToken (or null once we pass 2500 messages = MAX_WINDOWS * 500).
+// Each Gmail `list` call returns up to 500 messages for the requested window
+// and a nextPageToken (or null once we pass 2500 messages = MAX_WINDOWS * 500).
 function gmailWindow(token: string | null) {
   const start = token ? Number(token) * 500 : 0;
   const messages = Array.from({ length: 500 }, (_, i) => ({
     id: `m_${start + i}`,
     threadId: `t_${start + i}`,
-    internalDate: String(Date.now() - (start + i) * 1000),
-    labelIds: ["INBOX"],
-    payload: {
-      headers: [
-        { name: "Subject", value: `Subject ${start + i}` },
-        { name: "From", value: `from${start + i}@x.com` },
-        { name: "To", value: "me@x.com" },
-        { name: "Date", value: new Date().toUTCString() },
-      ],
-    },
   }));
   const nextToken = start + 500 < 2500 ? String(start / 500 + 1) : null;
   return { messages, nextPageToken: nextToken };
 }
 
-const mockFetch = vi.fn<(url: string) => Promise<{ ok: boolean; status: number; json: () => Promise<{ messages: unknown[]; nextPageToken: string | null }> }>>();
+// SDK messages.get returns full metadata for a single message.
+function gmailGetMessage(id: string) {
+  return {
+    id,
+    threadId: `t_${id}`,
+    internalDate: String(Date.now()),
+    labelIds: ["INBOX"],
+    snippet: `snippet ${id}`,
+    payload: {
+      headers: [
+        { name: "Subject", value: `Subject ${id}` },
+        { name: "From", value: `${id}@x.com` },
+        { name: "To", value: "me@x.com" },
+        { name: "Date", value: new Date().toUTCString() },
+      ],
+    },
+  };
+}
 
 vi.mock("@/server/corsair", () => ({
   corsair: { withTenant: () => fakeClient },
@@ -89,7 +97,7 @@ function reset() {
   dbRows = [];
   syncState = null;
   listCallCount = 0;
-  getUrls.length = 0;
+  getMessageCallCount = 0;
   mockListMessages.mockReset();
   mockListByLabel.mockReset();
   mockCountByLabel.mockReset();
@@ -99,10 +107,10 @@ function reset() {
   mockGetMailSyncState.mockReset();
   mockUpsertMailSyncState.mockReset();
   mockApiMessagesList.mockReset();
+  mockApiMessagesGet.mockReset();
   mockApiLabelsList.mockReset();
   mockDbLabelsList.mockReset();
   mockGetAccessToken.mockReset();
-  mockFetch.mockReset();
 
   mockGetAccountId.mockResolvedValue(ACCOUNT);
   mockGetAccessToken.mockResolvedValue("tok");
@@ -143,41 +151,37 @@ function reset() {
     syncState = { nextPageToken: token, windowIndex: idx };
   });
 
-  // Gmail list: exactly one call per window, returns 500 messages, 0 gets.
-  mockFetch.mockImplementation(async (url: string) => {
-    const u = String(url);
-    if (/\/messages\/[^?]/.test(u)) getUrls.push(u); // a per-message GET
-    let token: string | null = null;
-    const m = /[?&]pageToken=([^&]+)/.exec(u);
-    if (m) token = m[1] ?? null;
+  // SDK messages.list: returns 500 IDs per window.
+  mockApiMessagesList.mockImplementation(async (input: { pageToken?: string }) => {
+    let token: string | null = input.pageToken ?? null;
     listCallCount++;
-    return {
-      ok: true,
-      status: 200,
-      json: async () => gmailWindow(token),
-    };
+    return gmailWindow(token);
+  });
+
+  // SDK messages.get: returns full metadata for a single message.
+  mockApiMessagesGet.mockImplementation(async (input: { id: string }) => {
+    getMessageCallCount++;
+    return gmailGetMessage(input.id);
   });
 }
 
 beforeEach(() => {
   vi.resetModules();
   reset();
-  vi.stubGlobal("fetch", mockFetch);
 });
 
 afterEach(() => {
-  vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
 
 describe("window backfill invariants", () => {
-  it("refreshInbox (window 1) = exactly 1 list call, 0 per-message gets", async () => {
+  it("refreshInbox (window 1) = 1 list call + 500 get calls (enrichment)", async () => {
     const { refreshInbox } = await import("@/server/mail/mail-background-sync");
     const res = await refreshInbox("INBOX", 1);
 
     expect(res.synced).toBe(500);
-    expect(listCallCount).toBe(1); // exactly one list(format=metadata,500)
-    expect(getUrls).toHaveLength(0); // zero per-message gets
+    expect(listCallCount).toBe(1); // exactly one messages.list
+    expect(getMessageCallCount).toBe(500); // 500 messages.get for enrichment
     expect(dbRows).toHaveLength(500);
     expect(syncState?.nextPageToken).toBe("1");
     expect(syncState?.windowIndex).toBe(1);
@@ -193,14 +197,14 @@ describe("window backfill invariants", () => {
     const r1 = await getMailList({ page: 21 });
     // One additional on-demand window (window 2) for page 21.
     expect(listCallCount).toBe(2);
-    expect(getUrls).toHaveLength(0);
     expect(r1.items).toHaveLength(25);
     expect(r1.page).toBe(21);
     expect(r1.hasMore).toBe(true);
 
     // Subsequent read of page 21 hits the DB cache, no new Gmail call.
+    const prevListCalls = listCallCount;
     const r2 = await getMailList({ page: 21 });
-    expect(listCallCount).toBe(2);
+    expect(listCallCount).toBe(prevListCalls);
     expect(r2.items).toHaveLength(25);
   });
 
@@ -212,29 +216,15 @@ describe("window backfill invariants", () => {
     // per-request cap the loop would never stop. Use a numeric window counter
     // so each window fetches distinct, valid rows.
     let wc = 0;
-    mockFetch.mockImplementation(async () => {
+    mockApiMessagesList.mockImplementation(async (input: { pageToken?: string }) => {
       const start = wc * 500;
       wc++;
       listCallCount++;
       const messages = Array.from({ length: 500 }, (_, i) => ({
         id: `m_${start + i}`,
         threadId: `t_${start + i}`,
-        internalDate: String(Date.now() - (start + i) * 1000),
-        labelIds: ["INBOX"],
-        payload: {
-          headers: [
-            { name: "Subject", value: `Subject ${start + i}` },
-            { name: "From", value: `from${start + i}@x.com` },
-            { name: "To", value: "me@x.com" },
-            { name: "Date", value: new Date().toUTCString() },
-          ],
-        },
       }));
-      return {
-        ok: true,
-        status: 200,
-        json: async () => ({ messages, nextPageToken: String(wc) }),
-      };
+      return { messages, nextPageToken: String(wc) };
     });
 
     // An "infinite" mailbox: without the per-request cap the loop would never
@@ -243,7 +233,6 @@ describe("window backfill invariants", () => {
     // 100, which is exactly reachable within the cap, so the page is served.
     const r = await getMailList({ page: 100 });
     expect(listCallCount).toBe(MAX_WINDOWS);
-    expect(getUrls).toHaveLength(0);
     expect(r.items).toHaveLength(25);
     expect(r.page).toBe(100);
   });
@@ -261,6 +250,63 @@ describe("window backfill invariants", () => {
     }
     // No extra Gmail calls for cached pages.
     expect(listCallCount).toBe(1);
-    expect(getUrls).toHaveLength(0);
+  });
+
+  it("multi-window: pages 41–60 trigger windows 1+2+3 (1500 messages)", async () => {
+    const { getMailList } = await import("@/server/mail");
+
+    // Request page 50 — needs windows 1, 2, 3 (pages 1–75).
+    const r = await getMailList({ page: 50 });
+    expect(listCallCount).toBe(3); // 3 windows × 500 = 1500 messages
+    expect(dbRows.length).toBe(1500);
+    expect(r.items).toHaveLength(25);
+    expect(r.page).toBe(50);
+    expect(r.hasMore).toBe(true);
+    expect(syncState?.nextPageToken).toBe("3");
+  });
+
+  it("multi-window: pages 81–100 trigger windows 1–5 (2500 messages, capped)", async () => {
+    const { getMailList } = await import("@/server/mail");
+    const { MAX_WINDOWS } = await import("@/server/mail/schemas");
+
+    // Request page 100 — needs windows 1–5 (2500 messages = MAX_WINDOWS).
+    const r = await getMailList({ page: 100 });
+    expect(listCallCount).toBe(MAX_WINDOWS);
+    expect(dbRows.length).toBe(MAX_WINDOWS * 500);
+    expect(r.items).toHaveLength(25);
+    expect(r.page).toBe(100);
+  });
+
+  it("backfill with zero messages from Gmail returns synced=0", async () => {
+    mockApiMessagesList.mockResolvedValueOnce({ messages: [], nextPageToken: null });
+
+    const { refreshInbox } = await import("@/server/mail/mail-background-sync");
+    const res = await refreshInbox("INBOX", 1);
+
+    expect(res.synced).toBe(0);
+    expect(dbRows).toHaveLength(0);
+  });
+
+  it("backfill persists nextPageToken; on-demand backfill chains windows", async () => {
+    const { refreshInbox } = await import("@/server/mail/mail-background-sync");
+    const { getMailList } = await import("@/server/mail");
+
+    // Window 1 via refreshInbox — always starts from token null.
+    await refreshInbox("INBOX", 1);
+    expect(listCallCount).toBe(1);
+    expect(syncState?.nextPageToken).toBe("1");
+    expect(dbRows).toHaveLength(500);
+
+    // On-demand backfill triggered by requesting page 25 (needs windows 1+2).
+    // Window 1 already exists, so only window 2 is fetched = 2 total list calls.
+    const r = await getMailList({ page: 25 });
+    expect(listCallCount).toBe(2);
+    expect(dbRows).toHaveLength(1000);
+    expect(r.items).toHaveLength(25);
+    expect(r.page).toBe(25);
+
+    // Verify the second list call used pageToken "1" from syncState.
+    const secondCall = mockApiMessagesList.mock.calls[1];
+    expect(secondCall?.[0]?.pageToken).toBe("1");
   });
 });

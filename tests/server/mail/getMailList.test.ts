@@ -35,7 +35,7 @@ const mockGetAccessToken = vi.fn<() => Promise<string | null>>();
 const mockUpsertManyByEntityIds = vi.fn();
 const mockGetAccountIdForTenant = vi.fn();
 
-const mockFetch = vi.fn();
+const mockApiMessagesGet = vi.fn();
 const mockLabelsList = vi.fn<() => Promise<unknown[]>>();
 
 const mockWithTenant = vi.fn(() => ({
@@ -53,6 +53,7 @@ const mockWithTenant = vi.fn(() => ({
     api: {
       messages: {
         list: mockApiMessagesList,
+        get: mockApiMessagesGet,
       },
     },
     keys: {
@@ -120,23 +121,18 @@ function makeRows(count: number): Row[] {
 }
 
 function mockGmailFetchFor(rows: Row[]): void {
-  mockFetch.mockImplementation(async (url: string) => {
-    const match = /\/messages\/([^/?]+)/.exec(url);
-    const id = match?.[1] ?? "";
+  mockApiMessagesGet.mockImplementation(async (params: { id: string }) => {
+    const id = params.id;
     return {
-      ok: true,
-      status: 200,
-      json: async () => ({
-        id,
-        threadId: `t_${id}`,
-        payload: {
-          headers: [
-            { name: "Subject", value: `Subject ${id}` },
-            { name: "From", value: `${id}@example.com` },
-            { name: "To", value: "me@example.com" },
-          ],
-        },
-      }),
+      id,
+      threadId: `t_${id}`,
+      payload: {
+        headers: [
+          { name: "Subject", value: `Subject ${id}` },
+          { name: "From", value: `${id}@example.com` },
+          { name: "To", value: "me@example.com" },
+        ],
+      },
     };
   });
 }
@@ -194,7 +190,7 @@ describe("getMailList (v2 contract)", () => {
     mockGetAccessToken.mockReset();
     mockUpsertManyByEntityIds.mockReset();
     mockGetAccountIdForTenant.mockReset();
-    mockFetch.mockReset();
+    mockApiMessagesGet.mockReset();
     mockLabelsList.mockReset();
     mockWithTenant.mockClear();
     mockGetSessionTenantId.mockReset();
@@ -207,8 +203,6 @@ describe("getMailList (v2 contract)", () => {
         items.map((i) => ({ data: { id: i.entityId } })),
     );
 
-    vi.stubGlobal("fetch", mockFetch);
-
     mockListByLabel.mockResolvedValue([]);
     mockCountByLabel.mockResolvedValue(0);
     mockListMessages.mockResolvedValue([]);
@@ -217,7 +211,6 @@ describe("getMailList (v2 contract)", () => {
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
 
@@ -238,7 +231,7 @@ describe("getMailList (v2 contract)", () => {
   });
 
   it("clamps non-finite / non-positive page to 1", async () => {
-    mockListMessages.mockResolvedValueOnce(makeRows(20));
+    mockListByLabel.mockResolvedValueOnce(makeRows(20));
     mockDbCount.mockResolvedValueOnce(20);
 
     const { getMailList } = await import("@/server/mail");
@@ -253,7 +246,7 @@ describe("getMailList (v2 contract)", () => {
     it("reads the page from the DB at the requested offset (no 220-row fetch for page 10)", async () => {
       // PAGE_SIZE * page is the offset; PAGE_SIZE rows are returned.
       const rows = makeRows(PAGE_SIZE);
-      mockListMessages.mockResolvedValueOnce(rows);
+      mockListByLabel.mockResolvedValueOnce(rows);
       // resolveCount reads label.messagesTotal from labels.list first;
       // falling back to countByLabel is the secondary path. Here we test
       // the label.messagesTotal path.
@@ -271,8 +264,9 @@ describe("getMailList (v2 contract)", () => {
       expect(result.hasMore).toBe(true);
       expect(result.hasPrev).toBe(true);
       expect(result.items).toHaveLength(PAGE_SIZE);
-      expect(mockListMessages).toHaveBeenCalledWith(
+      expect(mockListByLabel).toHaveBeenCalledWith(
         "account_1",
+        ["INBOX"],
         expect.objectContaining({ limit: PAGE_SIZE, offset: PAGE_SIZE * 9 }),
       );
       expect(mockApiMessagesList).not.toHaveBeenCalled();
@@ -280,7 +274,7 @@ describe("getMailList (v2 contract)", () => {
 
     it("reads the first page from the DB at offset 0", async () => {
       const rows = makeRows(PAGE_SIZE);
-      mockListMessages.mockResolvedValueOnce(rows);
+      mockListByLabel.mockResolvedValueOnce(rows);
       mockLabelsList.mockResolvedValueOnce([
         { data: { id: "INBOX", messagesTotal: PAGE_SIZE } },
       ]);
@@ -297,7 +291,7 @@ describe("getMailList (v2 contract)", () => {
     });
 
     it("returns empty page beyond the cached range and marks hasMore=false", async () => {
-      mockListMessages.mockResolvedValueOnce([]);
+      mockListByLabel.mockResolvedValueOnce([]);
       mockLabelsList.mockResolvedValueOnce([
         { data: { id: "INBOX", messagesTotal: 10 } },
       ]);
@@ -314,7 +308,7 @@ describe("getMailList (v2 contract)", () => {
 
     it("falls back to countByLabel when the label row is absent", async () => {
       const rows = makeRows(15);
-      mockListMessages.mockResolvedValueOnce(rows);
+      mockListByLabel.mockResolvedValueOnce(rows);
       mockLabelsList.mockResolvedValueOnce([]); // no cached label row
       mockCountByLabel.mockResolvedValueOnce(15);
 
@@ -327,7 +321,7 @@ describe("getMailList (v2 contract)", () => {
 
     it("falls back to client.gmail.db.messages.count() when no label and no row", async () => {
       const rows = makeRows(10);
-      mockListMessages.mockResolvedValueOnce(rows);
+      mockListByLabel.mockResolvedValueOnce(rows);
       // Force the label-less path: clear labels.list so resolveCount falls
       // through to dbCount for unfiltered INBOX.
       mockLabelsList.mockResolvedValueOnce([]);
@@ -343,7 +337,7 @@ describe("getMailList (v2 contract)", () => {
     });
 
     it("computes cacheState='partial' when DB has fewer rows than count says", async () => {
-      mockListMessages.mockResolvedValueOnce(makeRows(10));
+      mockListByLabel.mockResolvedValueOnce(makeRows(10));
       mockLabelsList.mockResolvedValueOnce([
         { data: { id: "INBOX", messagesTotal: 100 } },
       ]);
@@ -360,7 +354,7 @@ describe("getMailList (v2 contract)", () => {
     });
 
     it("computes cacheState='empty' when DB has zero rows", async () => {
-      mockListMessages.mockResolvedValueOnce([]);
+      mockListByLabel.mockResolvedValueOnce([]);
       mockLabelsList.mockResolvedValueOnce([
         { data: { id: "INBOX", messagesTotal: 0 } },
       ]);
@@ -376,7 +370,7 @@ describe("getMailList (v2 contract)", () => {
 
     it("computes cacheState='full' when DB covers count", async () => {
       const rows = makeRows(PAGE_SIZE);
-      mockListMessages.mockResolvedValueOnce(rows);
+      mockListByLabel.mockResolvedValueOnce(rows);
       mockLabelsList.mockResolvedValueOnce([
         { data: { id: "INBOX", messagesTotal: PAGE_SIZE } },
       ]);
@@ -394,7 +388,7 @@ describe("getMailList (v2 contract)", () => {
 
     it("does not include legacy nextPageToken or totalCount in the response", async () => {
       const rows = makeRows(PAGE_SIZE);
-      mockListMessages.mockResolvedValueOnce(rows);
+      mockListByLabel.mockResolvedValueOnce(rows);
       mockLabelsList.mockResolvedValueOnce([
         { data: { id: "INBOX", messagesTotal: PAGE_SIZE } },
       ]);
@@ -530,7 +524,7 @@ describe("getMailList (v2 contract)", () => {
       // 3 pages of 25 = 75 items. Use mockResolvedValue (not Once) so the
       // mock applies across both page 1 and page 3 calls.
       const rows = makeRows(PAGE_SIZE);
-      mockListMessages.mockResolvedValue(rows);
+      mockListByLabel.mockResolvedValue(rows);
       mockLabelsList.mockResolvedValue([
         { data: { id: "INBOX", messagesTotal: 75 } },
       ]);
@@ -549,7 +543,7 @@ describe("getMailList (v2 contract)", () => {
     });
 
     it("empty mailbox: count=0 → totalPages=1, hasMore=false, hasPrev=false", async () => {
-      mockListMessages.mockResolvedValueOnce([]);
+      mockListByLabel.mockResolvedValueOnce([]);
       mockLabelsList.mockResolvedValueOnce([
         { data: { id: "INBOX", messagesTotal: 0 } },
       ]);
@@ -566,7 +560,7 @@ describe("getMailList (v2 contract)", () => {
 
     it("partial last page: 30 items in 2 pages", async () => {
       const rows = makeRows(5); // last page short
-      mockListMessages.mockResolvedValueOnce(rows);
+      mockListByLabel.mockResolvedValueOnce(rows);
       mockLabelsList.mockResolvedValueOnce([
         { data: { id: "INBOX", messagesTotal: 30 } },
       ]);
@@ -586,7 +580,7 @@ describe("getMailList (v2 contract)", () => {
   describe("cache key isolation (per-tenant)", () => {
     it("keys the response cache by tenant id so a write from tenant A doesn't affect tenant B", async () => {
       const rows = makeRows(PAGE_SIZE);
-      mockListMessages.mockResolvedValueOnce(rows);
+      mockListByLabel.mockResolvedValueOnce(rows);
       mockLabelsList.mockResolvedValueOnce([
         { data: { id: "INBOX", messagesTotal: PAGE_SIZE } },
       ]);
