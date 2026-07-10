@@ -8,7 +8,7 @@ import { EmailIframe } from "@/components/email-iframe";
 import { MailToolbarButton } from "./mail-toolbar-button";
 import { StarIcon } from "lucide-react";
 import { cn, decodeHtmlEntities, linkifyText } from "@/lib/utils";
-import { formatReceived } from "@/lib/mail/format";
+import { formatReceived, prefixSubject } from "@/lib/mail/format";
 import type { MailListItem, MailMessage } from "@/server/mail/schemas";
 
 function formatSize(bytes: number): string {
@@ -83,7 +83,7 @@ export function MailViewer({
           shortcut="R"
           onClick={() => {
             if (!selectedListItem || !message) return;
-            window.dispatchEvent(new CustomEvent("mail:reply", { detail: { to: message.from || "", subject: message.subject ? `Re: ${message.subject}` : "", threadId: selectedListItem.threadId } }));
+            window.dispatchEvent(new CustomEvent("mail:reply", { detail: { to: message.from || "", subject: prefixSubject(message.subject, "Re:"), threadId: selectedListItem.threadId } }));
           }}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -96,7 +96,7 @@ export function MailViewer({
           shortcut="A"
           onClick={() => {
             if (!selectedListItem || !message) return;
-            window.dispatchEvent(new CustomEvent("mail:replyAll", { detail: { to: message.from || "", subject: message.subject ? `Re: ${message.subject}` : "", threadId: selectedListItem.threadId } }));
+            window.dispatchEvent(new CustomEvent("mail:replyAll", { detail: { to: message.from || "", subject: prefixSubject(message.subject, "Re:"), threadId: selectedListItem.threadId } }));
           }}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -111,7 +111,7 @@ export function MailViewer({
           shortcut="F"
           onClick={() => {
             if (!selectedListItem || !message) return;
-            window.dispatchEvent(new CustomEvent("mail:forward", { detail: { subject: message.subject ? `Fwd: ${message.subject}` : "", threadId: selectedListItem.threadId } }));
+            window.dispatchEvent(new CustomEvent("mail:forward", { detail: { subject: prefixSubject(message.subject, "Fwd:"), threadId: selectedListItem.threadId } }));
           }}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">

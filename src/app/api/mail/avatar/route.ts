@@ -15,7 +15,7 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "Invalid url" }, { status: 400 });
   }
 
-  const allowedHosts = ["lh3.googleusercontent.com", "lh4.googleusercontent.com", "lh5.googleusercontent.com", "lh6.googleusercontent.com", "fonts.gstatic.com"];
+  const allowedHosts = ["lh3.googleusercontent.com", "lh4.googleusercontent.com", "lh5.googleusercontent.com", "lh6.googleusercontent.com"];
   if (!allowedHosts.includes(parsed.hostname)) {
     return NextResponse.json({ error: "Host not allowed" }, { status: 403 });
   }
