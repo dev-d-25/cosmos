@@ -2,7 +2,6 @@ import { corsair } from "@/server/corsair";
 import {
   countByLabel,
   listByLabel,
-  listMessages,
 } from "@/server/db/mail-entities";
 import {
   PAGE_SIZE,
@@ -197,7 +196,7 @@ async function assembleInbox(
   const { accountId, client } = ctx;
   const offset = (page - 1) * PAGE_SIZE;
 
-  let rows = await listMessages(accountId, {
+  let rows = await listByLabel(accountId, [INBOX_LABEL], {
     limit: PAGE_SIZE,
     offset,
   });
@@ -209,7 +208,7 @@ async function assembleInbox(
 
   if (stubIds.length > 0) {
     await enrichStubs(accountId, client, stubIds);
-    rows = await listMessages(accountId, { limit: PAGE_SIZE, offset });
+    rows = await listByLabel(accountId, [INBOX_LABEL], { limit: PAGE_SIZE, offset });
   }
 
   const enriched = rows.filter(isRowEnriched);

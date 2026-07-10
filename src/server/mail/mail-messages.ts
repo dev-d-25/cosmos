@@ -1,41 +1,20 @@
 "use server";
 
 import { corsair } from "@/server/corsair";
-import {
-  upsertManyByEntityIds,
-  type RawMessageEntity,
-} from "@/server/db/mail-entities";
 import { getClient } from "./mail-list";
 import { fetchMessageFull, fetchAttachment } from "./gmail-adapter";
 
+/**
+ * Fetch full message body via the SDK. The SDK's `messages.get` auto-upserts
+ * the enriched record (subject, from, to, body) to the DB, so no manual
+ * upsert is needed here.
+ */
 async function fetchAndPersistFullBody(
-  accountId: string,
+  _accountId: string,
   client: ReturnType<typeof corsair.withTenant>,
   id: string,
 ): Promise<Record<string, unknown>> {
-  const raw = await fetchMessageFull(client, id);
-
-  const payload = raw.payload as
-    | { headers?: Array<{ name?: string; value?: string }> }
-    | undefined;
-  const headers = payload?.headers ?? [];
-  const get = (name: string) =>
-    headers.find((h) => h.name?.toLowerCase() === name.toLowerCase())?.value;
-
-  await upsertManyByEntityIds(accountId, [
-    {
-      entityId: id,
-      data: {
-        ...(raw as RawMessageEntity),
-        id,
-        subject: get("Subject"),
-        from: get("From"),
-        to: get("To"),
-      },
-    },
-  ]);
-
-  return raw;
+  return fetchMessageFull(client, id);
 }
 
 export async function getMessage(

@@ -1,7 +1,8 @@
 "use server";
 
 import { corsair } from "@/server/corsair";
-import { getClient, invalidateMailListCacheForTenant } from "./mail-list";
+import { getClient } from "./mail-list";
+import { invalidateMailListCacheForTenant } from "./mail-page-cache";
 
 type Mutation = (input: {
   client: ReturnType<typeof corsair.withTenant>;

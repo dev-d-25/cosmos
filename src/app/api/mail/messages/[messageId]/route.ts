@@ -38,7 +38,7 @@ export async function GET(
     return NextResponse.json({ error: "Not found" }, { status: 404 });
   }
 
-  const transformed = toMailMessage(result.data.message);
+  const transformed = toMailMessage(result.data.message as Record<string, unknown>);
   const parsed = MailMessageSchema.safeParse(transformed);
   if (!parsed.success) {
     console.error("[mail] Invalid message data shape:", parsed.error.issues);

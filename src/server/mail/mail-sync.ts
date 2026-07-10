@@ -1,6 +1,7 @@
 "use server";
 
-import { getClient, invalidateMailListCacheForTenant } from "./mail-list";
+import { getClient } from "./mail-list";
+import { invalidateMailListCacheForTenant } from "./mail-page-cache";
 
 export async function clearMailCache(): Promise<{
   deletedMessages: number;

@@ -13,13 +13,12 @@ import { describeError } from "./mail-utils";
 const ENRICH_HEADERS = ["Subject", "From", "To", "Date"];
 
 /**
- * Enrich a set of message stubs (rows that lack Subject/From) by fetching each
- * message's `format=metadata` body. This is only ever used for the small sets
- * that already came back from a live Gmail `list` call (search results, token
- * pages) — never for bulk window backfill, which uses `backfillWindow`'s
- * single `list(format=metadata, 500)` instead.
+ * Enrich a set of message stubs by fetching each message's metadata via
+ * `messages.get(format=metadata)`. Called by both `backfillWindow` (bulk
+ * window backfill) and inline for search-result / page-token stubs.
  *
- * Uses `fetchMessageMetadata` (built on the shared `gmailFetch` with
+ * Skips IDs that are already enriched (have subject + from). Uses
+ * `fetchMessageMetadata` (built on the shared `gmailFetch` with
  * 401-refresh + 429-retry) so we don't duplicate retry logic here.
  */
 async function enrichStubs(
@@ -109,14 +108,16 @@ async function enrichStubs(
 }
 
 /**
- * Pull one 500-message window of metadata for a view and upsert the enriched
- * rows. One `list(format=metadata, 500)` call returns id + Subject/From/To/Date
- * for the whole window — zero per-message `get`. Returns the `nextPageToken`
- * the caller persists (per account + view) so the next on-demand window can
- * resume without re-walking from the top.
+ * Pull one window of message IDs via `messages.list`, then enrich each via
+ * per-message `messages.get(format=metadata)` to get Subject/From/To/Date,
+ * labelIds, snippet, etc.
  *
- * No task queue, no backgrounding: the caller `await`s this inline inside the
- * request that needs it (refresh or on-demand getMailList).
+ * Gmail's `messages.list` only returns `{id, threadId}` — the `format` and
+ * `metadataHeaders` params are silently ignored. To get actual metadata we
+ * must call `messages.get` for each ID (via `enrichStubs`).
+ *
+ * Returns the `nextPageToken` the caller persists (per account + view) so
+ * the next on-demand window can resume without re-walking from the top.
  */
 async function backfillWindow(
   accountId: string,
@@ -124,40 +125,26 @@ async function backfillWindow(
   view: { labelIds?: string[]; query?: string },
   token: string | null = null,
 ): Promise<{ synced: number; nextToken: string | null }> {
+  const t0 = Date.now();
   const res = await listMessages(client, view, 500, token);
 
-  const items: UpsertItem[] = (res.messages ?? [])
-    .map((m): UpsertItem | null => {
-      const id = m.id;
-      if (!id) return null;
-      const payload = m.payload;
-      const headers = payload?.headers ?? [];
-      const h = (name: string) =>
-        headers.find((x) => x.name?.toLowerCase() === name.toLowerCase())?.value;
-      return {
-        entityId: id,
-        data: {
-          id,
-          threadId: m.threadId,
-          snippet: m.snippet,
-          internalDate: m.internalDate,
-          labelIds: m.labelIds,
-          subject: h("Subject"),
-          from: h("From"),
-          to: h("To"),
-          receivedAt: m.internalDate
-            ? new Date(Number(m.internalDate)).toISOString()
-            : undefined,
-        } as RawMessageEntity,
-      };
-    })
-    .filter((x): x is UpsertItem => x !== null);
+  const ids = (res.messages ?? [])
+    .map((m) => m.id)
+    .filter((id): id is string => !!id);
 
-  if (items.length > 0) {
-    await upsertManyByEntityIds(accountId, items);
+  if (ids.length === 0) {
+    console.log(`[mail] backfillWindow: no IDs from list, token=${token ?? "null"}`);
+    return { synced: 0, nextToken: res.nextPageToken ?? null };
   }
 
-  return { synced: items.length, nextToken: res.nextPageToken ?? null };
+  await enrichStubs(accountId, client, ids);
+
+  const elapsed = Date.now() - t0;
+  console.log(
+    `[mail] backfillWindow: enriched ${ids.length} messages in ${elapsed}ms, nextToken=${res.nextPageToken ? "present" : "null"}`,
+  );
+
+  return { synced: ids.length, nextToken: res.nextPageToken ?? null };
 }
 
 export { enrichStubs, backfillWindow };

@@ -6,26 +6,14 @@ import { corsair } from "@/server/corsair";
 import { db } from "@/server/db";
 import { user } from "@/server/db/schema";
 
-async function getAccessToken(
-  client: ReturnType<typeof corsair.withTenant>,
-): Promise<string | null> {
-  return client.gmail.keys.get_access_token();
-}
-
-async function refreshAuth(
-  client: ReturnType<typeof corsair.withTenant>,
-): Promise<string> {
-  const gmail = client.gmail as unknown as {
-    _refreshAuth?: () => Promise<string>;
-  };
-  if (!gmail._refreshAuth) throw new Error("no_refresh_auth");
-  return gmail._refreshAuth();
-}
-
 type GmailFetchResult<T> =
   | { ok: true; value: T }
   | { ok: false; error: Error };
 
+/**
+ * Raw fetch to Gmail API — used only for endpoints the SDK doesn't cover
+ * (e.g. attachments). For messages.get / messages.list, use the SDK instead.
+ */
 async function gmailFetch<T>(
   client: ReturnType<typeof corsair.withTenant>,
   path: string,
@@ -33,27 +21,16 @@ async function gmailFetch<T>(
 ): Promise<GmailFetchResult<T>> {
   const { retries = 3 } = options ?? {};
 
-  let accessToken = await getAccessToken(client);
+  const accessToken = await client.gmail.keys.get_access_token();
   if (!accessToken) return { ok: false, error: new Error("no_access_token") };
 
   const url = `https://gmail.googleapis.com/gmail/v1/users/me/${path}`;
 
-  const doFetch = (token: string) =>
-    fetch(url, { headers: { Authorization: `Bearer ${token}` } });
-
   let lastError: Error | undefined;
   for (let attempt = 0; attempt <= retries; attempt++) {
-    let response = await doFetch(accessToken);
-
-    if (response.status === 401 && attempt === 0) {
-      try {
-        accessToken = await refreshAuth(client);
-        response = await doFetch(accessToken);
-      } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err));
-        break;
-      }
-    }
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
 
     if (response.status === 429 && attempt < retries) {
       const retryAfter = response.headers.get("Retry-After");
@@ -81,23 +58,28 @@ async function gmailFetch<T>(
   return { ok: false, error: lastError ?? new Error("exhausted_retries") };
 }
 
+/**
+ * Fetch message metadata via the Corsair SDK's `messages.get` with
+ * `format=metadata`. The SDK handles auth, retries, and auto-upserts
+ * the enriched record to the DB.
+ *
+ * Returns the SDK's Message object (with id, labelIds, snippet,
+ * internalDate, payload.headers, etc.).
+ */
 export async function fetchMessageMetadata(
   client: ReturnType<typeof corsair.withTenant>,
   ids: string[],
   metadataHeaders: string[] = ["Subject", "From", "To", "Date"],
 ): Promise<Array<{ id: string; raw: Record<string, unknown> }>> {
-  const headersParam = metadataHeaders
-    .map((h) => `metadataHeaders=${encodeURIComponent(h)}`)
-    .join("&");
-
   const results = await Promise.allSettled(
     ids.map(async (id) => {
-      const result = await gmailFetch<Record<string, unknown>>(
-        client,
-        `messages/${id}?format=metadata&${headersParam}`,
-      );
-      if (!result.ok) throw result.error;
-      return { id, raw: result.value };
+      const msg = await client.gmail.api.messages.get({
+        userId: "me",
+        id,
+        format: "metadata",
+        metadataHeaders,
+      });
+      return { id, raw: msg as unknown as Record<string, unknown> };
     }),
   );
 
@@ -108,18 +90,26 @@ export async function fetchMessageMetadata(
   return successes;
 }
 
+/**
+ * Fetch full message body via the Corsair SDK's `messages.get` with
+ * `format=full`. The SDK handles auth, retries, and auto-upserts
+ * the complete record (including body) to the DB.
+ */
 export async function fetchMessageFull(
   client: ReturnType<typeof corsair.withTenant>,
   id: string,
 ): Promise<Record<string, unknown>> {
-  const result = await gmailFetch<Record<string, unknown>>(
-    client,
-    `messages/${id}?format=full`,
-  );
-  if (!result.ok) throw result.error;
-  return result.value;
+  const msg = await client.gmail.api.messages.get({
+    userId: "me",
+    id,
+    format: "full",
+  });
+  return msg as unknown as Record<string, unknown>;
 }
 
+/**
+ * Fetch attachment data via raw HTTP — the SDK has no endpoint for this.
+ */
 export async function fetchAttachment(
   client: ReturnType<typeof corsair.withTenant>,
   messageId: string,
@@ -136,11 +126,6 @@ export async function fetchAttachment(
 export interface GmailListMessage {
   id?: string;
   threadId?: string;
-  snippet?: string;
-  historyId?: string;
-  internalDate?: string;
-  labelIds?: string[];
-  payload?: { headers?: Array<{ name?: string; value?: string }> };
 }
 
 export interface GmailListResult {
@@ -149,13 +134,12 @@ export interface GmailListResult {
 }
 
 /**
- * Single `messages.list(format=metadata, maxResults, token?)` call that returns
- * id + Subject/From/To/Date for up to 500 messages at once. Replaces the old
- * per-message `messages.get` storm that `enrichStubs` did. Returns the raw
- * `nextPageToken` so callers can persist it and walk the mailbox on demand.
+ * Fetch message IDs (and nextPageToken) via the Corsair SDK's `messages.list`.
+ * Returns only `{id, threadId}` per message — to get Subject/From/To/Date,
+ * call `fetchMessageMetadata` or `enrichStubs` with the returned IDs.
  *
- * Uses the shared `gmailFetch` (401-refresh + 429-retry), so it is serverless
- * safe and never blocks on a background queue.
+ * The SDK handles auth, retries, and the labelIds array is passed correctly
+ * (the SDK's request builder flattens arrays into repeated query params).
  */
 export async function listMessages(
   client: ReturnType<typeof corsair.withTenant>,
@@ -163,30 +147,17 @@ export async function listMessages(
   maxResults: number,
   token?: string | null,
 ): Promise<GmailListResult> {
-  const params = new URLSearchParams();
-  params.set("maxResults", String(Math.min(Math.max(1, maxResults), 500)));
-  if (token) params.set("pageToken", token);
-  if (view.labelIds?.length) {
-    for (const id of view.labelIds) params.append("labelIds", id);
-  }
-  if (view.query) {
-    params.set("q", view.query);
-    params.set("includeSpamTrash", "true");
-  }
-  params.set("format", "metadata");
-  for (const h of ["Subject", "From", "To", "Date"]) {
-    params.append("metadataHeaders", h);
-  }
-
-  const result = await gmailFetch<GmailListResult>(
-    client,
-    `messages?${params.toString()}`,
-  );
-  if (!result.ok) throw result.error;
+  const result = await client.gmail.api.messages.list({
+    userId: "me",
+    maxResults: Math.min(Math.max(1, maxResults), 500),
+    ...(token ? { pageToken: token } : {}),
+    ...(view.labelIds?.length ? { labelIds: view.labelIds } : {}),
+    ...(view.query ? { q: view.query, includeSpamTrash: true } : {}),
+  });
 
   return {
-    messages: result.value.messages ?? [],
-    nextPageToken: result.value.nextPageToken ?? null,
+    messages: (result.messages ?? []) as GmailListMessage[],
+    nextPageToken: result.nextPageToken ?? null,
   };
 }
 

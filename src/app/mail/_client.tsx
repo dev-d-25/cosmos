@@ -263,8 +263,10 @@ export function MailInterface({
     ? "Not connected"
     : threadsQuery.isLoading
       ? "Loading..."
-      : items.length === 0 && count === 0
+      : count === 0 && items.length === 0
         ? "No mail cached"
+      : source === "syncing" || cacheState === "empty" || cacheState === "partial"
+        ? "Syncing"
         : "Synced";
 
   const selectedListItem = items.find((i) => i.id === selectedId) ?? null;
