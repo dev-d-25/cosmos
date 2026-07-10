@@ -101,6 +101,13 @@ export function EmailIframe({ html, className, messageId, inlineImages }: EmailI
       .forEach((a) => {
         a.target = "_blank";
         a.rel = "noopener noreferrer";
+        a.addEventListener("click", (e) => {
+          e.preventDefault();
+          const href = a.href;
+          if (href) {
+            window.open(href, "_blank");
+          }
+        });
       });
   }, []);
 
