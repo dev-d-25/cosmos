@@ -3,10 +3,7 @@
 import { corsair } from "@/server/corsair";
 import { getClient } from "./mail-list";
 import { describeError } from "./mail-utils";
-import {
-  GetProfileApiResponseSchema,
-  MailLabelSchema,
-} from "./schemas";
+import { MailLabelSchema } from "./schemas";
 import type {
   MailLabel,
   MailProfile,
@@ -112,39 +109,34 @@ const profileCache = new Map<string, { value: MailProfile; at: number }>();
 export async function getProfile(): Promise<MailProfile | null> {
   const ctx = await getClient();
   if (!ctx) return null;
-  const { tenantId, client } = ctx;
+  const { tenantId } = ctx;
 
   const hit = profileCache.get(tenantId);
   if (hit && Date.now() - hit.at < PROFILE_TTL_MS) return hit.value;
 
-  const corsairApi = client.gmail.api as unknown as {
-    usersGetProfile?: (opts: {}) => Promise<unknown>;
-  };
-  const raw = await corsairApi.usersGetProfile?.({});
-  if (!raw) {
-    return null;
-  }
-
-  const parsed = GetProfileApiResponseSchema.parse(raw);
-
   let name = "";
+  let email = "";
   let picture = "";
   try {
     const { getSession } = await import("@/server/better-auth/server");
     const session = await getSession();
-    name = (session?.user as { name?: string })?.name ?? "";
-    picture = (session?.user as { image?: string })?.image ?? "";
+    if (session?.user) {
+      const u = session.user as Record<string, unknown>;
+      name = (typeof u.name === "string" ? u.name : "") || "";
+      email = (typeof u.email === "string" ? u.email : "") || "";
+      picture = (typeof u.image === "string" ? u.image : "") || "";
+    }
   } catch {
-    // Fall back to email-derived name
+    // Fall back
   }
 
   const value: MailProfile = {
-    emailAddress: parsed.emailAddress,
-    messagesTotal: parsed.messagesTotal,
-    threadsTotal: parsed.threadsTotal,
-    historyId: parsed.historyId,
+    emailAddress: email,
+    messagesTotal: 0,
+    threadsTotal: 0,
+    historyId: "",
     cachedAt: new Date().toISOString(),
-    name: name || parsed.emailAddress?.split("@")[0] || "",
+    name: name || email.split("@")[0] || "User",
     picture,
   };
   profileCache.set(tenantId, { value, at: Date.now() });
