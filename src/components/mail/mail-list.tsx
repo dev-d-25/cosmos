@@ -3,9 +3,7 @@
 import { useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { cn, decodeHtmlEntities } from "@/lib/utils";
-import { MailTag } from "./mail-tag";
-import { MailToolbarButton } from "./mail-toolbar-button";
-import { StarIcon } from "lucide-react";
+import { CheckIcon, Archive, Trash2, Star, MailOpen, X } from "lucide-react";
 import type { MailListItem } from "@/server/mail/schemas";
 import { formatReceived } from "@/lib/mail/format";
 import { isReadLocally } from "@/lib/read-emails";
@@ -25,6 +23,7 @@ const PREFETCH_VISIBLE_RATIO = 0.5;
 function MailListRow({
   item,
   isSelected,
+  isMultiSelected,
   isRead,
   onSelect,
   onOpen,
@@ -32,8 +31,9 @@ function MailListRow({
 }: {
   item: MailListItem;
   isSelected: boolean;
+  isMultiSelected: boolean;
   isRead: boolean;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, e?: React.MouseEvent) => void;
   onOpen?: (id: string) => void;
   onPrefetch: (id: string) => void;
 }) {
@@ -79,61 +79,54 @@ function MailListRow({
     <button
       ref={ref}
       type="button"
-      onClick={() => onSelect(item.id)}
+      onClick={(e) => onSelect(item.id, e)}
       onDoubleClick={() => onOpen?.(item.id)}
       data-message-id={item.id}
       data-selected={isSelected ? "true" : "false"}
       aria-current={isSelected ? "true" : undefined}
       className={cn(
-        "border-border hover:bg-accent block w-full border-b border-l-2 border-l-transparent px-4 py-3 text-left transition",
+        "border-border hover:bg-accent block w-full border-b border-l-2 border-l-transparent px-4 py-4 text-left transition cursor-pointer",
         isRead ? "bg-muted" : "",
         isSelected && "bg-accent border-l-primary",
+        isMultiSelected && !isSelected && "bg-accent/50",
       )}
     >
-      <div className="mb-1 flex items-center gap-2">
+      <div className="flex items-center gap-2">
+        {/* Checkbox */}
+        <div
+          className={cn(
+            "flex size-4 shrink-0 items-center justify-center rounded border transition",
+            isSelected || isMultiSelected
+              ? "bg-primary border-primary text-primary-foreground"
+              : "border-border",
+          )}
+        >
+          {(isSelected || isMultiSelected) && <CheckIcon size={10} strokeWidth={3} />}
+        </div>
+
+        {/* Unread dot */}
         <span
           className={cn(
             "size-1.5 shrink-0 rounded-full",
             isRead ? "bg-muted-foreground" : "bg-primary",
           )}
         />
-        <span className="truncate text-sm font-semibold">
-          {decodeHtmlEntities(item.from) || "(unknown sender)"}
-        </span>
-        <span className="text-muted-foreground shrink-0 text-[0.625rem]">
-          {formatReceived(item.receivedAt)}
-        </span>
-      </div>
-      <p className="truncate pl-3.5 text-xs font-medium">
-        {decodeHtmlEntities(item.subject) || "(no subject)"}
-      </p>
-      <p className="text-muted-foreground truncate pl-3.5 text-[0.625rem]">
-        {decodeHtmlEntities(item.snippet)}
-      </p>
-      {item.labelIds.length > 0 ? (
-        <div className="mt-1 flex flex-wrap gap-1 pl-3.5">
-          {item.labelIds
-            .filter(
-              (l) =>
-                ![
-                  "INBOX",
-                  "UNREAD",
-                  "IMPORTANT",
-                  "CATEGORY_PERSONAL",
-                  "CATEGORY_SOCIAL",
-                  "CATEGORY_UPDATES",
-                  "CATEGORY_PROMOTIONS",
-                  "CATEGORY_FORUMS",
-                ].includes(l),
-            )
-            .slice(0, 3)
-            .map((label) => (
-              <MailTag key={label}>
-                {label.replace(/^CATEGORY_/, "").replace(/^Label_/, "")}
-              </MailTag>
-            ))}
+
+        {/* Sender + date on one line, subject below */}
+        <div className="min-w-0 flex-1">
+          <div className="flex items-baseline">
+            <span className={cn("min-w-0 flex-1 truncate text-sm", !isRead && "font-semibold")}>
+              {decodeHtmlEntities(item.from) || "(unknown sender)"}
+            </span>
+            <span className="text-muted-foreground shrink-0 pl-2 text-[0.625rem]">
+              {formatReceived(item.receivedAt)}
+            </span>
+          </div>
+          <p className={cn("truncate text-xs", !isRead ? "font-medium" : "text-muted-foreground")}>
+            {decodeHtmlEntities(item.subject) || "(no subject)"}
+          </p>
         </div>
-      ) : null}
+      </div>
     </button>
   );
 }
@@ -143,8 +136,11 @@ export type CacheState = "full" | "partial" | "empty";
 export function MailList({
   items,
   selectedId,
+  selectedIds,
   onSelect,
   onOpen,
+  onBatchAction,
+  onClearSelection,
   page,
   totalPages,
   hasMore,
@@ -165,8 +161,11 @@ export function MailList({
 }: {
   items: MailListItem[];
   selectedId: string | null;
-  onSelect: (id: string) => void;
+  selectedIds: Set<string>;
+  onSelect: (id: string, e?: React.MouseEvent) => void;
   onOpen?: (id: string) => void;
+  onBatchAction?: (action: string, ids: string[]) => void;
+  onClearSelection?: () => void;
   page: number;
   totalPages: number | null;
   hasMore: boolean;
@@ -289,8 +288,64 @@ export function MailList({
 
   return (
     <div className="border-border bg-card flex min-w-0 flex-col border-r">
-      <div className="border-border flex h-11 shrink-0 items-center gap-2 border-b px-4">
-        {searchQuery ? (
+      {/* Header: batch actions or label/search */}
+      <div className="border-border flex h-11 shrink-0 items-center gap-1 border-b px-4">
+        {selectedIds.size > 0 ? (
+          <>
+            <span className="text-muted-foreground mr-1 text-xs font-medium">{selectedIds.size} selected</span>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2 text-xs"
+              onClick={() => onBatchAction?.("archive", Array.from(selectedIds))}
+              title="Archive"
+            >
+              <Archive size={13} />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2 text-xs"
+              onClick={() => onBatchAction?.("trash", Array.from(selectedIds))}
+              title="Delete"
+            >
+              <Trash2 size={13} />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2 text-xs"
+              onClick={() => onBatchAction?.("star", Array.from(selectedIds))}
+              title="Star"
+            >
+              <Star size={13} />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 gap-1 px-2 text-xs"
+              onClick={() => onBatchAction?.("markUnread", Array.from(selectedIds))}
+              title="Mark unread"
+            >
+              <MailOpen size={13} />
+            </Button>
+            <div className="flex-1" />
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={onClearSelection}
+              title="Clear selection"
+            >
+              <X size={13} />
+            </Button>
+          </>
+        ) : searchQuery ? (
           <div className="flex items-center gap-2">
             <svg className="text-muted-foreground size-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <circle cx="11" cy="11" r="8" />
@@ -310,26 +365,19 @@ export function MailList({
         ) : (
           <span className="text-sm font-semibold">{labelName}</span>
         )}
-        <button
-          type="button"
-          aria-label="Filter"
-          className="border-border text-muted-foreground hover:bg-accent hover:text-foreground ml-auto flex size-7 items-center justify-center border transition"
-        >
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
-          </svg>
-        </button>
       </div>
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto">
         {items.map((item) => {
           const isSelected = selectedId === item.id;
+          const isMultiSelected = selectedIds.has(item.id);
           const isRead = !item.unread || isReadLocally(item.id);
           return (
             <MailListRow
               key={item.id}
               item={item}
               isSelected={isSelected}
+              isMultiSelected={isMultiSelected}
               isRead={isRead}
               onSelect={onSelect}
               onOpen={onOpen}

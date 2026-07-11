@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -44,6 +44,7 @@ import {
 import { markAsReadLocally } from "@/lib/read-emails";
 import type { MailSyncedState as SyncedState } from "@/types/mail";
 import { getGmailParamsForView, MAIL_LABELS } from "@/lib/mail/labels";
+import { prefixSubject } from "@/lib/mail/format";
 
 /**
  * Parse a `?page` query value into a positive integer. Returns 1 for
@@ -108,6 +109,12 @@ export function MailInterface({
 
   const [composeOpen, setComposeOpen] = useStateShim(false);
   const [shortcutsOpen, setShortcutsOpen] = useStateShim(false);
+  const [composeMode, setComposeMode] = useState<"compose" | "reply" | "replyAll" | "forward">("compose");
+  const [composeInitial, setComposeInitial] = useState<{ to?: string; subject?: string; body?: string; threadId?: string }>({});
+
+  // ─── Multi-select state ──────────────────────────────────────────────
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const lastClickedIndexRef = useRef<number>(-1);
 
   const threadsQuery = useMailThreads({
     page,
@@ -271,17 +278,98 @@ export function MailInterface({
 
   const selectedListItem = items.find((i) => i.id === selectedId) ?? null;
 
+  const openCompose = useCallback(
+    (mode: "reply" | "replyAll" | "forward") => {
+      const msg = messageQuery.data?.message;
+      if (!selectedListItem || !msg) return;
+      setComposeMode(mode);
+      setComposeInitial({
+        to: msg.from || "",
+        subject:
+          mode === "forward"
+            ? prefixSubject(msg.subject, "Fwd:")
+            : prefixSubject(msg.subject, "Re:"),
+        body: mode === "forward" ? msg.bodyText || msg.bodyHtml || "" : undefined,
+        threadId: selectedListItem.threadId,
+      });
+      setComposeOpen(true);
+    },
+    [selectedListItem, messageQuery.data?.message],
+  );
+
+  const openReply = useCallback(() => openCompose("reply"), [openCompose]);
+  const openReplyAll = useCallback(() => openCompose("replyAll"), [openCompose]);
+  const openForward = useCallback(() => openCompose("forward"), [openCompose]);
+
+  // Listen for CustomEvents from MailViewer toolbar
+  useEffect(() => {
+    const onReply = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      setComposeMode("reply");
+      setComposeInitial({ to: detail.to, subject: detail.subject, threadId: detail.threadId });
+      setComposeOpen(true);
+    };
+    const onReplyAll = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      setComposeMode("replyAll");
+      setComposeInitial({ to: detail.to, subject: detail.subject, threadId: detail.threadId });
+      setComposeOpen(true);
+    };
+    const onForward = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      setComposeMode("forward");
+      setComposeInitial({ subject: detail.subject, threadId: detail.threadId });
+      setComposeOpen(true);
+    };
+    window.addEventListener("mail:reply", onReply);
+    window.addEventListener("mail:replyAll", onReplyAll);
+    window.addEventListener("mail:forward", onForward);
+    return () => {
+      window.removeEventListener("mail:reply", onReply);
+      window.removeEventListener("mail:replyAll", onReplyAll);
+      window.removeEventListener("mail:forward", onForward);
+    };
+  }, []);
+
   // ─── Pager math falls out of the response ──────────────────────────────
   // No client-side totalPages derivation. The server's response IS the
   // math. When the URL changes, the query refetches, the new response
   // lands, and the pager renders from it.
 
   const onSelect = useCallback(
-    (id: string) => {
+    (id: string, e?: React.MouseEvent) => {
+      const index = items.findIndex((item) => item.id === id);
+      const isCtrl = e?.ctrlKey || e?.metaKey;
+      const isShift = e?.shiftKey;
+
+      if (isShift && lastClickedIndexRef.current >= 0 && index >= 0) {
+        // Range select: from last clicked to current
+        const start = Math.min(lastClickedIndexRef.current, index);
+        const end = Math.max(lastClickedIndexRef.current, index);
+        const rangeIds = items.slice(start, end + 1).map((item) => item.id);
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          for (const rid of rangeIds) next.add(rid);
+          return next;
+        });
+      } else if (isCtrl || isShift) {
+        // Toggle individual
+        setSelectedIds((prev) => {
+          const next = new Set(prev);
+          if (next.has(id)) next.delete(id);
+          else next.add(id);
+          return next;
+        });
+      } else {
+        // Normal click: clear selection, just navigate
+        setSelectedIds(new Set());
+      }
+
+      lastClickedIndexRef.current = index;
       markAsReadLocally(id);
       navigate({ id });
     },
-    [navigate],
+    [navigate, items],
   );
 
   const onOpen = useCallback(
@@ -325,8 +413,13 @@ export function MailInterface({
           return;
         }
         if (["archive", "trash", "delete", "spam"].includes(action)) {
-          // Optimistic: close viewer. URL drops ?id.
-          navigate({ id: null });
+          if (extra?.ids && Array.isArray(extra.ids)) {
+            // Batch: clear selection
+            setSelectedIds(new Set());
+          } else {
+            // Optimistic: close viewer. URL drops ?id.
+            navigate({ id: null });
+          }
         }
         // Refetch threads so the action's effect on labels/count is
         // reflected immediately.
@@ -350,12 +443,14 @@ export function MailInterface({
   useMailShortcuts({
     items,
     selectedId,
+    selectedIds,
     setSelectedId: (valueOrUpdater) => {
       const nextId = typeof valueOrUpdater === "function"
         ? valueOrUpdater(selectedId)
         : valueOrUpdater;
       navigate({ id: nextId });
     },
+    setSelectedIds,
     onOpen,
     onClose,
     onMailAction,
@@ -398,8 +493,11 @@ export function MailInterface({
             <MailList
               items={items}
               selectedId={selectedId}
+              selectedIds={selectedIds}
               onSelect={onSelect}
               onOpen={onOpen}
+              onBatchAction={(action, ids) => onMailAction(action, "", { ids })}
+              onClearSelection={() => setSelectedIds(new Set())}
               page={pageFromResponse}
               totalPages={totalPages}
               hasMore={hasMore}
