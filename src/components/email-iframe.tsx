@@ -99,13 +99,8 @@ export function EmailIframe({ html, className, messageId, inlineImages }: EmailI
     iframe.contentDocument
       ?.querySelectorAll<HTMLAnchorElement>("a[href]")
       .forEach((a) => {
-        a.addEventListener("click", (e) => {
-          e.preventDefault();
-          const href = a.href;
-          if (href) {
-            window.open(href, "_blank");
-          }
-        });
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
       });
   }, []);
 
