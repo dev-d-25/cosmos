@@ -24,7 +24,7 @@ export function MailTopNav({
   onShortcutsOpenChange,
 }: {
   syncedState: SyncedState;
-  profile: { emailAddress?: string } | null;
+  profile: { emailAddress?: string; name?: string; picture?: string } | null;
   onRefresh: () => void;
   onClearCache: () => void;
   isRefreshing: boolean;

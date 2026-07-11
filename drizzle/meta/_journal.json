@@ -22,6 +22,13 @@
       "when": 1781755804471,
       "tag": "0002_nappy_mongoose",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1783685196767,
+      "tag": "0003_perpetual_grim_reaper",
+      "breakpoints": true
     }
   ]
 }

@@ -99,8 +99,19 @@ export function EmailIframe({ html, className, messageId, inlineImages }: EmailI
     iframe.contentDocument
       ?.querySelectorAll<HTMLAnchorElement>("a[href]")
       .forEach((a) => {
-        a.target = "_blank";
-        a.rel = "noopener noreferrer";
+        a.addEventListener("click", (e) => {
+          e.preventDefault();
+          const href = a.href;
+          if (href) {
+            const link = document.createElement("a");
+            link.href = href;
+            link.target = "_blank";
+            link.rel = "noopener";
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+          }
+        });
       });
   }, []);
 
@@ -130,7 +141,7 @@ export function EmailIframe({ html, className, messageId, inlineImages }: EmailI
       ref={iframeRef}
       srcDoc={srcDoc}
       sandbox="allow-same-origin allow-popups"
-      referrerPolicy="no-referrer"
+      referrerPolicy="strict-origin-when-cross-origin"
       title="Email content"
       onLoad={onLoad}
       className={className}

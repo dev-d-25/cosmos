@@ -8,7 +8,7 @@ const mockFindByEntityId = vi.fn<(id: string) => Promise<Row | null>>();
 const mockGetAccessToken = vi.fn<() => Promise<string | null>>();
 const mockUpsertManyByEntityIds = vi.fn();
 
-const mockFetch = vi.fn();
+const mockApiMessagesGet = vi.fn();
 
 const mockWithTenant = vi.fn(() => ({
   gmail: {
@@ -19,6 +19,11 @@ const mockWithTenant = vi.fn(() => ({
     },
     keys: {
       get_access_token: mockGetAccessToken,
+    },
+    api: {
+      messages: {
+        get: mockApiMessagesGet,
+      },
     },
   },
 }));
@@ -62,15 +67,13 @@ describe("getMessage", () => {
     mockFindByEntityId.mockReset();
     mockGetAccessToken.mockReset();
     mockUpsertManyByEntityIds.mockReset();
-    mockFetch.mockReset();
+    mockApiMessagesGet.mockReset();
     mockGetSessionTenantId.mockReset();
     mockGetSessionTenantId.mockResolvedValue("tenant_1");
     mockGetAccessToken.mockResolvedValue("fake_access_token");
-    vi.stubGlobal("fetch", mockFetch);
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
 
@@ -95,7 +98,7 @@ describe("getMessage", () => {
 
     expect(result).not.toBeNull();
     expect(result?.source).toBe("cache");
-    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockApiMessagesGet).not.toHaveBeenCalled();
     expect(mockUpsertManyByEntityIds).not.toHaveBeenCalled();
   });
 
@@ -116,7 +119,7 @@ describe("getMessage", () => {
     const result = await getMessage("msg_2");
 
     expect(result?.source).toBe("cache");
-    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockApiMessagesGet).not.toHaveBeenCalled();
   });
 
   /**
@@ -143,7 +146,7 @@ describe("getMessage", () => {
 
     expect(result?.source).toBe("cache");
     // Critical: no live fetch, no SDK auto-persist 3-query upsert
-    expect(mockFetch).not.toHaveBeenCalled();
+    expect(mockApiMessagesGet).not.toHaveBeenCalled();
     expect(mockUpsertManyByEntityIds).not.toHaveBeenCalled();
   });
 
@@ -186,18 +189,14 @@ describe("getMessage", () => {
         payload: makeMultipartPayload(),
       },
     });
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        id: "msg_4",
-        threadId: "msg_4",
-        payload: {
-          headers: [{ name: "Subject", value: "Forced" }],
-          mimeType: "text/plain",
-          body: { data: Buffer.from("forced").toString("base64") },
-        },
-      }),
+    mockApiMessagesGet.mockResolvedValueOnce({
+      id: "msg_4",
+      threadId: "msg_4",
+      payload: {
+        headers: [{ name: "Subject", value: "Forced" }],
+        mimeType: "text/plain",
+        body: { data: Buffer.from("forced").toString("base64") },
+      },
     });
 
     const { getMessage } = await import("@/server/mail");
@@ -205,10 +204,11 @@ describe("getMessage", () => {
 
     expect(result?.source).toBe("live");
     expect(mockFindByEntityId).not.toHaveBeenCalled();
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    // After live fetch, the message is upserted via the native helper
-    // (not the SDK's 3-query upsertByEntityId)
-    expect(mockUpsertManyByEntityIds).toHaveBeenCalledTimes(1);
+    // SDK messages.get is called (it auto-upserts to DB internally)
+    expect(mockApiMessagesGet).toHaveBeenCalledTimes(1);
+    expect(mockApiMessagesGet).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "msg_4", format: "full" }),
+    );
   });
 
   it("falls back to live fetch when cache row has no body data (metadata only)", async () => {
@@ -220,25 +220,24 @@ describe("getMessage", () => {
         // No payload — just metadata from format=metadata enrichment
       },
     });
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        id: "msg_5",
-        threadId: "msg_5",
-        payload: makeMultipartPayload(),
-      }),
+    mockApiMessagesGet.mockResolvedValueOnce({
+      id: "msg_5",
+      threadId: "msg_5",
+      payload: makeMultipartPayload(),
     });
 
     const { getMessage } = await import("@/server/mail");
     const result = await getMessage("msg_5");
 
     expect(result?.source).toBe("live");
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    expect(mockUpsertManyByEntityIds).toHaveBeenCalledTimes(1);
+    // SDK messages.get is called (it auto-upserts to DB internally)
+    expect(mockApiMessagesGet).toHaveBeenCalledTimes(1);
+    expect(mockApiMessagesGet).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "msg_5", format: "full" }),
+    );
   });
 
-  it("persists the full Gmail payload via native ON CONFLICT (not the SDK's 3-query upsert)", async () => {
+  it("fetches via SDK messages.get(format=full) when cache has no body", async () => {
     mockFindByEntityId.mockResolvedValueOnce({
       data: { id: "msg_6" },
     });
@@ -250,38 +249,29 @@ describe("getMessage", () => {
       snippet: "snip",
       payload: makeMultipartPayload(),
     };
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => fetched,
-    });
+    mockApiMessagesGet.mockResolvedValueOnce(fetched);
 
     const { getMessage } = await import("@/server/mail");
-    await getMessage("msg_6");
+    const result = await getMessage("msg_6");
 
-    expect(mockUpsertManyByEntityIds).toHaveBeenCalledTimes(1);
-    const [_accountId, items] = mockUpsertManyByEntityIds.mock.calls[0]!;
-    expect(items).toHaveLength(1);
-    const item = items[0];
-    expect(item.entityId).toBe("msg_6");
-    // The denormalized fields MUST be on the row, not just inside the payload
-    expect(item.data.subject).toBe("Security alert");
-    expect(item.data.from).toBe("Google <no-reply@accounts.google.com>");
-    expect(item.data.to).toBe("me@example.com");
-    // The legacy body-as-object bug is fixed: no `body: <object>` here
-    expect(item.data.body).toBeUndefined();
+    expect(result?.source).toBe("live");
+    expect(result?.message).toEqual(fetched);
+    // SDK messages.get is called with format=full (auto-upserts to DB)
+    expect(mockApiMessagesGet).toHaveBeenCalledTimes(1);
+    expect(mockApiMessagesGet).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "msg_6", format: "full" }),
+    );
   });
 
-  it("propagates errors from fetchAndPersistFullBody (e.g. no access token)", async () => {
+  it("propagates errors from SDK messages.get (e.g. auth failure)", async () => {
     mockFindByEntityId.mockResolvedValueOnce({
       data: { id: "msg_7" }, // no body → triggers live fetch
     });
-    mockGetAccessToken.mockResolvedValueOnce(null); // no token → throws
+    mockApiMessagesGet.mockRejectedValueOnce(new Error("no_access_token"));
 
     const { getMessage } = await import("@/server/mail");
-    // No access token → fetchAndPersistFullBody throws. The route
-    // catches this and returns 500. getMessage does not catch its
-    // own errors.
+    // SDK messages.get throws. getMessage does not catch its
+    // own errors; the route catches and returns 500.
     await expect(getMessage("msg_7")).rejects.toThrow("no_access_token");
   });
 });

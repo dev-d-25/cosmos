@@ -8,7 +8,7 @@ import { EmailIframe } from "@/components/email-iframe";
 import { MailToolbarButton } from "./mail-toolbar-button";
 import { StarIcon } from "lucide-react";
 import { cn, decodeHtmlEntities, linkifyText } from "@/lib/utils";
-import { formatReceived } from "@/lib/mail/format";
+import { formatReceived, prefixSubject } from "@/lib/mail/format";
 import type { MailListItem, MailMessage } from "@/server/mail/schemas";
 
 function formatSize(bytes: number): string {
@@ -78,13 +78,27 @@ export function MailViewer({
   return (
     <main className="bg-background flex min-w-0 flex-col overflow-hidden">
       <div className="border-border bg-card flex h-12 shrink-0 items-center gap-0.5 border-b px-2">
-        <MailToolbarButton label="Reply" shortcut="R">
+        <MailToolbarButton
+          label="Reply"
+          shortcut="R"
+          onClick={() => {
+            if (!selectedListItem || !message) return;
+            window.dispatchEvent(new CustomEvent("mail:reply", { detail: { to: message.from || "", subject: prefixSubject(message.subject, "Re:"), threadId: selectedListItem.threadId } }));
+          }}
+        >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="9 14 4 9 9 4" />
             <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
           </svg>
         </MailToolbarButton>
-        <MailToolbarButton label="Reply All" shortcut="A">
+        <MailToolbarButton
+          label="Reply All"
+          shortcut="A"
+          onClick={() => {
+            if (!selectedListItem || !message) return;
+            window.dispatchEvent(new CustomEvent("mail:replyAll", { detail: { to: message.from || "", subject: prefixSubject(message.subject, "Re:"), threadId: selectedListItem.threadId } }));
+          }}
+        >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="9 14 4 9 9 4" />
             <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
@@ -92,7 +106,14 @@ export function MailViewer({
             <path d="M22 20v-7a4 4 0 0 0-4-4H8" />
           </svg>
         </MailToolbarButton>
-        <MailToolbarButton label="Forward" shortcut="F">
+        <MailToolbarButton
+          label="Forward"
+          shortcut="F"
+          onClick={() => {
+            if (!selectedListItem || !message) return;
+            window.dispatchEvent(new CustomEvent("mail:forward", { detail: { subject: prefixSubject(message.subject, "Fwd:"), threadId: selectedListItem.threadId } }));
+          }}
+        >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <polyline points="15 14 19 9 15 4" />
             <path d="M4 20v-7a4 4 0 0 1 4-4h12" />

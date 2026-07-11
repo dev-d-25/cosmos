@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Explainer — Mail Pipeline (Window Backfill + Page Assembly)</title>
+<style>
+  :root{
+    --ink:#111;
+    --dim:#555;
+    --faint:#888;
+    --line:#ccc;
+    --box:#f4f4f4;
+    --box2:#fff;
+    --bg:#fff;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.6;font-size:15px;
+  }
+  .wrap{max-width:900px;margin:0 auto;padding:48px 28px 96px}
+  h1{font-size:30px;line-height:1.2;margin:0 0 6px;font-weight:700;letter-spacing:-.01em}
+  h2{font-size:20px;margin:44px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--line);font-weight:700}
+  h3{font-size:16px;margin:26px 0 8px;font-weight:700}
+  p{margin:10px 0;color:var(--ink)}
+  .sub{color:var(--dim);margin-top:0}
+  .mono{font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;font-size:13px}
+  code{
+    font-family:"SFMono-Regular",Consolas,"Liberation Mono",Menlo,monospace;
+    background:var(--box);border:1px solid var(--line);border-radius:4px;
+    padding:1px 5px;font-size:13px;
+  }
+  .tag{
+    display:inline-block;font-family:monospace;font-size:11px;letter-spacing:.08em;
+    text-transform:uppercase;border:1px solid var(--ink);border-radius:999px;
+    padding:3px 10px;margin-right:6px;vertical-align:middle;
+  }
+  .callout{
+    border:1px solid var(--ink);border-left-width:4px;border-radius:8px;
+    padding:14px 18px;margin:18px 0;background:var(--box2);
+  }
+  .callout.tldr{border-left-color:#000;background:#fafafa}
+  .callout.warning{border-left-color:#c00;background:#fff5f5}
+  .callout.info{border-left-color:#0066cc;background:#f0f6ff}
+  .callout b{color:var(--ink)}
+  table{border-collapse:collapse;width:100%;margin:16px 0;font-size:14px}
+  th,td{border:1px solid var(--line);padding:10px 12px;text-align:left;vertical-align:top}
+  th{background:var(--box);font-weight:700;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+  .file{font-family:monospace;font-size:12.5px}
+  .diagram{border:1px solid var(--line);border-radius:10px;padding:22px;margin:18px 0;background:#fff;overflow-x:auto}
+  .diagram svg{display:block;min-width:640px}
+  ul{margin:10px 0;padding-left:22px}
+  li{margin:5px 0}
+  .arrow{font-family:monospace;color:var(--faint)}
+  footer{margin-top:64px;border-top:1px solid var(--line);padding-top:16px;
+    font-family:monospace;font-size:11px;color:var(--faint)}
+  a{color:var(--ink)}
+  .tier{display:inline-block;font-family:monospace;font-size:11px;letter-spacing:.06em;
+    border:1px solid var(--ink);border-radius:4px;padding:2px 8px;margin-right:4px;vertical-align:middle}
+  .tier-1{background:#e8f5e9;border-color:#2e7d32;color:#1b5e20}
+  .tier-2{background:#e3f2fd;border-color:#1565c0;color:#0d47a1}
+  .tier-3{background:#fff3e0;border-color:#e65100;color:#bf360c}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+<script>mermaid.initialize({startOnLoad:true,theme:'default',securityLevel:'loose'});</script>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Mail Pipeline — How data flows from Gmail to the UI</h1>
+  <p class="sub">The full data path: Gmail API → Corsair SDK → DB → page assembly → React. Covers the three fetch tiers, window backfill, and the per-page enrichment cycle.</p>
+
+  <div class="callout tldr">
+    <p style="margin:0"><span class="tag">TL;DR</span> Gmail messages flow through <b>three tiers</b>: (1) bulk window backfill pulls 500 IDs then enriches each via <code>messages.get(format=metadata)</code>, (2) page assembly reads the DB at the requested offset and enriches any remaining stubs inline, (3) clicking a message triggers a full <code>messages.get(format=full)</code> fetch. The DB is the source of truth after tier 1; tiers 2 and 3 never bypass it.</p>
+  </div>
+
+  <h2>1. The three fetch tiers</h2>
+
+  <table>
+    <tr>
+      <th>Tier</th>
+      <th>When</th>
+      <th>Gmail call</th>
+      <th>DB write</th>
+    </tr>
+    <tr>
+      <td><span class="tier tier-1">TIER 1</span> Window backfill</td>
+      <td>On-demand when page is empty (cold start), or via background refresh</td>
+      <td><code>messages.list(maxResults=500)</code> → IDs only<br/><code>messages.get(id, format=metadata)</code> × N</td>
+      <td><code>upsertManyByEntityIds</code> — stores subject, from, to, labelIds, snippet, internalDate</td>
+    </tr>
+    <tr>
+      <td><span class="tier tier-2">TIER 2</span> Page assembly</td>
+      <td>Every page load (DB read is the fast path)</td>
+      <td>None (DB read only). If stubs found, enriches inline via <code>messages.get(format=metadata)</code></td>
+      <td>Only if stubs were enriched (rare after tier 1 ran)</td>
+    </tr>
+    <tr>
+      <td><span class="tier tier-3">TIER 3</span> Message detail</td>
+      <td>User clicks a message</td>
+      <td><code>messages.get(id, format=full)</code></td>
+      <td>SDK auto-upserts the full payload (body HTML/text, attachments)</td>
+    </tr>
+  </table>
+
+  <h2>2. Cold start vs warm start</h2>
+
+  <div class="callout info">
+    <p style="margin:0"><b>Cold start</b> = the DB has zero messages for this view (or the page is empty). The pipeline triggers on-demand window backfill to populate the DB before serving.</p>
+  </div>
+
+  <div class="callout info">
+    <p style="margin:0"><b>Warm start</b> = the DB already has enriched messages at the requested offset. The pipeline reads from DB and returns immediately — no Gmail call at all.</p>
+  </div>
+
+  <h3>Cold start flow</h3>
+  <div class="diagram">
+    <pre class="mermaid">
+flowchart TD
+    A[GET /api/mail?page=1] --> B[assemblePageWithBackfill]
+    B --> C[assemblePage → assembleInbox]
+    C --> D{DB has rows at offset?}
+    D -- "Yes (warm)" --> E[Return from DB]
+    D -- "No (cold)" --> F[backfillWindow]
+    F --> G["messages.list(maxResults=500)"]
+    G --> H[Get IDs + nextPageToken]
+    H --> I["enrichStubs(ids)"]
+    I --> J["messages.get(id, format=metadata) × N"]
+    J --> K[upsertManyByEntityIds]
+    K --> L[persist nextPageToken]
+    L --> M{rows now at offset?}
+    M -- "Yes" --> N[Return from DB]
+    M -- "No" --> O{windows < MAX_WINDOWS?}
+    O -- "Yes" --> F
+    O -- "No" --> P[Return empty]
+    </pre>
+  </div>
+
+  <h3>Warm start flow</h3>
+  <div class="diagram">
+    <pre class="mermaid">
+flowchart TD
+    A[GET /api/mail?page=1] --> B[assemblePageWithBackfill]
+    B --> C[assemblePage → assembleInbox]
+    C --> D{DB has rows at offset?}
+    D -- "Yes" --> E[listByLabel from DB]
+    E --> F[Filter enriched rows]
+    F --> G[Sort by receivedAt desc]
+    G --> H[Build page meta + count]
+    H --> I[Return MailListResponse]
+    </pre>
+  </div>
+
+  <h2>3. Window backfill — the 500-stub pipeline</h2>
+
+  <p>The core of tier 1. Called by <span class="file">mail-ingestion.ts:backfillWindow()</span>. Each window is exactly one Gmail <code>messages.list</code> call (max 500 IDs), followed by per-message enrichment.</p>
+
+  <h3>Why two steps?</h3>
+  <p>Gmail's <code>messages.list</code> only returns <code>{id, threadId}</code>. The <code>format</code> and <code>metadataHeaders</code> params are <b>silently ignored</b> on <code>messages.list</code>. To get Subject/From/To/Date, we must call <code>messages.get</code> for each ID individually.</p>
+
+  <div class="diagram">
+    <pre class="mermaid">
+flowchart LR
+    subgraph "Step 1: List"
+        A["messages.list(maxResults=500)"] --> B["{id, threadId} × 500"]
+    end
+    subgraph "Step 2: Enrich"
+        B --> C["messages.get(id, format=metadata)"]
+        C --> D["{id, labelIds, snippet, payload.headers}"]
+    end
+    subgraph "Step 3: Persist"
+        D --> E["upsertManyByEntityIds"]
+        E --> F[(DB)]
+    end
+    </pre>
+  </div>
+
+  <h3>Window chaining</h3>
+  <p>Each window returns a <code>nextPageToken</code>. This token is persisted in <code>mail_sync_state</code> (per account + view key) so the next window can resume from where the previous one left off. Chaining is bounded by <code>MAX_WINDOWS = 5</code> (2500 messages max per request).</p>
+
+  <table>
+    <tr><th>Window</th><th>Messages</th><th>Covers pages</th></tr>
+    <tr><td>1</td><td>1–500</td><td>1–20</td></tr>
+    <tr><td>2</td><td>501–1000</td><td>21–40</td></tr>
+    <tr><td>3</td><td>1001–1500</td><td>41–60</td></tr>
+    <tr><td>4</td><td>1501–2000</td><td>61–80</td></tr>
+    <tr><td>5</td><td>2001–2500</td><td>81–100 (MAX_PAGE)</td></tr>
+  </table>
+
+  <h2>4. Page assembly — the fast path</h2>
+
+  <p><span class="file">mail-page-assembly.ts:assembleInbox()</span> reads from the DB at the requested offset. No Gmail call unless stubs are found.</p>
+
+  <div class="diagram">
+    <pre class="mermaid">
+flowchart TD
+    A[assembleInbox] --> B["listByLabel(INBOX, limit=25, offset)"]
+    B --> C{Rows found?}
+    C -- "No" --> D[Return empty page]
+    C -- "Yes" --> E{Any un-enriched stubs?}
+    E -- "No" --> F[Filter enriched → sort → build meta]
+    E -- "Yes" --> G[enrichStubs for stub IDs]
+    G --> H[Re-read from DB]
+    H --> F
+    F --> I[Return MailListResponse]
+    </pre>
+  </div>
+
+  <h3>View classification</h3>
+  <table>
+    <tr><th>View</th><th>Classifier</th><th>Assembly path</th></tr>
+    <tr><td>INBOX (no labels, no query)</td><td><code>isFilteredLabelView → false</code></td><td><code>assembleInbox</code> — uses <code>listByLabel([INBOX])</code></td></tr>
+    <tr><td>STARRED, SENT, etc.</td><td><code>isFilteredLabelView → true</code></td><td><code>assembleFiltered</code> — uses <code>listByLabel(labelIds)</code></td></tr>
+    <tr><td>Free-text search (q=from:alice)</td><td><code>classifyView → "search"</code></td><td><code>assembleSearch</code> — live Gmail <code>messages.list</code></td></tr>
+  </table>
+
+  <h2>5. Message detail — tier 3</h2>
+
+  <p><span class="file">mail-messages.ts:getMessage()</span> handles the click-to-open flow.</p>
+
+  <div class="diagram">
+    <pre class="mermaid">
+flowchart TD
+    A[getMessage(id)] --> B{force=true?}
+    B -- "Yes" --> C["fetchMessageFull(id, format=full)"]
+    B -- "No" --> D[findByEntityId from DB]
+    D --> E{Cached row has body?}
+    E -- "Yes" --> F[Return from cache]
+    E -- "No" --> C
+    C --> G["SDK messages.get(format=full)"]
+    G --> H[SDK auto-upserts to DB]
+    H --> I[Return from live fetch]
+    </pre>
+  </div>
+
+  <div class="callout warning">
+    <p style="margin:0"><b>Note:</b> The SDK's <code>messages.get</code> auto-upserts the full record to the DB. <code>fetchAndPersistFullBody</code> no longer calls <code>upsertManyByEntityIds</code> directly — the SDK handles it internally via its own entity schema.</p>
+  </div>
+
+  <h2>6. DB schema and indexes</h2>
+
+  <table>
+    <tr><th>Index</th><th>Purpose</th></tr>
+    <tr><td><code>UNIQUE idx_corsair_entities_tenant_type_entity</code></td><td>Primary lookup: (account_id, entity_type, entity_id)</td></tr>
+    <tr><td><code>GIN idx_corsair_entities_messages_labels</code></td><td>Label containment: <code>data->'labelIds' @> '["INBOX"]'</code></td></tr>
+    <tr><td><code>mail_sync_state (account_id, view_key)</code></td><td>Window cursor: persists nextPageToken per view</td></tr>
+  </table>
+
+  <h2>7. Key files</h2>
+
+  <table>
+    <tr><th>File</th><th>Role</th></tr>
+    <tr><td class="file">gmail-adapter.ts</td><td>SDK wrapper: <code>listMessages</code>, <code>fetchMessageMetadata</code>, <code>fetchMessageFull</code>, <code>fetchAttachment</code></td></tr>
+    <tr><td class="file">mail-ingestion.ts</td><td><code>backfillWindow</code> (list → enrich), <code>enrichStubs</code> (per-message get)</td></tr>
+    <tr><td class="file">mail-page-assembly.ts</td><td><code>assemblePage</code> → <code>assembleInbox</code> / <code>assembleFiltered</code> / <code>assembleSearch</code></td></tr>
+    <tr><td class="file">mail-list.ts</td><td><code>getMailList</code> (entry point), <code>assemblePageWithBackfill</code> (chains windows)</td></tr>
+    <tr><td class="file">mail-messages.ts</td><td><code>getMessage</code> (tier 3), <code>prefetchFullBody</code>, <code>getAttachmentContent</code></td></tr>
+    <tr><td class="file">mail-read-model.ts</td><td><code>isRowEnriched</code>, <code>resolveCount</code>, <code>buildPageMeta</code>, view classification</td></tr>
+    <tr><td class="file">db/mail-entities.ts</td><td><code>listByLabel</code>, <code>countByLabel</code>, <code>upsertManyByEntityIds</code>, <code>getMailSyncState</code></td></tr>
+    <tr><td class="file">schemas.ts</td><td><code>PAGE_SIZE=25</code>, <code>MAX_WINDOWS=5</code>, <code>MAX_PAGE=100</code></td></tr>
+  </table>
+
+  <h2>8. Constants</h2>
+
+  <table>
+    <tr><th>Constant</th><th>Value</th><th>Why</th></tr>
+    <tr><td><code>PAGE_SIZE</code></td><td>25</td><td>Half of Gmail's default 50; kills SSR/client cache mismatch; one Gmail list call per page</td></tr>
+    <tr><td><code>MAX_WINDOWS</code></td><td>5</td><td>Upper bound on chained backfills per request (2500 messages max)</td></tr>
+    <tr><td><code>MAX_PAGE</code></td><td>100</td><td>MAX_WINDOWS × 20 pages/window; URL pages beyond 100 are clamped</td></tr>
+    <tr><td><code>ENRICH_HEADERS</code></td><td>["Subject","From","To","Date"]</td><td>Metadata headers fetched per message in tier 1</td></tr>
+  </table>
+
+  <footer>
+    Generated for the cosmos mail pipeline refactor · Window backfill fix + Corsair SDK migration · July 2026
+  </footer>
+
+</div>
+</body>
+</html>

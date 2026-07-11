@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { markAsReadLocally } from "@/lib/read-emails";
+import { prefixSubject } from "@/lib/mail/format";
 
 export interface ShortcutGroup {
   title: string;
@@ -13,12 +15,20 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
     shortcuts: [
       { keys: ["J"], description: "Next email" },
       { keys: ["K"], description: "Previous email" },
+      { keys: ["Shift", "J"], description: "Select down" },
+      { keys: ["Shift", "K"], description: "Select up" },
       { keys: ["Enter"], description: "Open email" },
       { keys: ["Esc"], description: "Close / Back" },
       { keys: ["G", "I"], description: "Go to Inbox" },
-      { keys: ["G", "D"], description: "Go to Drafts" },
+      { keys: ["G", "P"], description: "Go to Important" },
+      { keys: ["G", "S"], description: "Go to Starred" },
       { keys: ["G", "T"], description: "Go to Sent" },
+      { keys: ["G", "D"], description: "Go to Drafts" },
       { keys: ["G", "A"], description: "Go to Archive" },
+      { keys: ["G", "X"], description: "Go to Spam" },
+      { keys: ["1"], description: "Go to Mail" },
+      { keys: ["2"], description: "Go to Calendar" },
+      { keys: ["3"], description: "Go to Agent" },
     ],
   },
   {
@@ -52,9 +62,11 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
 ];
 
 interface UseMailShortcutsOpts {
-  items: Array<{ id: string }>;
+  items: Array<{ id: string; threadId?: string; from?: string; subject?: string }>;
   selectedId: string | null;
+  selectedIds: Set<string>;
   setSelectedId: React.Dispatch<React.SetStateAction<string | null>>;
+  setSelectedIds: React.Dispatch<React.SetStateAction<Set<string>>>;
   onOpen: (id: string) => void;
   onClose: () => void;
   onMailAction: (action: string, id: string) => void;
@@ -67,7 +79,9 @@ interface UseMailShortcutsOpts {
 export function useMailShortcuts({
   items,
   selectedId,
+  selectedIds,
   setSelectedId,
+  setSelectedIds,
   onOpen,
   onClose,
   onMailAction,
@@ -80,6 +94,9 @@ export function useMailShortcuts({
   itemsRef.current = items;
   const selectedIdRef = useRef(selectedId);
   selectedIdRef.current = selectedId;
+  const selectedIdsRef = useRef(selectedIds);
+  selectedIdsRef.current = selectedIds;
+  const lastShiftIndexRef = useRef<number>(-1);
   const onOpenRef = useRef(onOpen);
   onOpenRef.current = onOpen;
   const onCloseRef = useRef(onClose);
@@ -123,6 +140,10 @@ export function useMailShortcuts({
           event.preventDefault();
           navigateRef.current("/mail?label=INBOX");
           return;
+        } else if (event.key === "p") {
+          event.preventDefault();
+          navigateRef.current("/mail?label=IMPORTANT");
+          return;
         } else if (event.key === "d") {
           event.preventDefault();
           navigateRef.current("/mail?label=DRAFT");
@@ -139,6 +160,10 @@ export function useMailShortcuts({
           event.preventDefault();
           navigateRef.current("/mail?label=STARRED");
           return;
+        } else if (event.key === "x") {
+          event.preventDefault();
+          navigateRef.current("/mail?label=SPAM");
+          return;
         }
         // If not a valid g+key combo, fall through to normal handling
       }
@@ -154,26 +179,70 @@ export function useMailShortcuts({
         return;
       }
 
+      // Top nav number shortcuts
+      if (event.key === "1") {
+        event.preventDefault();
+        navigateRef.current("/mail");
+        return;
+      } else if (event.key === "2") {
+        event.preventDefault();
+        navigateRef.current("/calendar");
+        return;
+      } else if (event.key === "3") {
+        event.preventDefault();
+        navigateRef.current("/agent");
+        return;
+      }
+
       const currentItems = itemsRef.current;
       if (!currentItems.length) return;
 
       const currentSelectedId = selectedIdRef.current;
 
+      const move = (dir: 1 | -1) => {
+        event.preventDefault();
+        const isShift = event.shiftKey;
+        if (isShift) {
+          // Range select: Shift+Down / Shift+Up
+          setSelectedId((current) => {
+            const idx = current ? currentItems.findIndex((i) => i.id === current) : -1;
+            const nextIdx =
+              dir === 1
+                ? Math.min(currentItems.length - 1, idx + 1)
+                : Math.max(0, idx - 1);
+            const next = currentItems[nextIdx];
+            if (!next?.id) return current;
+            if (lastShiftIndexRef.current < 0) lastShiftIndexRef.current = idx;
+            const start = Math.min(lastShiftIndexRef.current, nextIdx);
+            const end = Math.max(lastShiftIndexRef.current, nextIdx);
+            const rangeIds = currentItems.slice(start, end + 1).map((i) => i.id);
+            setSelectedIds(new Set(rangeIds));
+            markAsReadLocally(next.id);
+            return next.id;
+          });
+        } else {
+          lastShiftIndexRef.current = -1;
+          setSelectedIds(new Set());
+          setSelectedId((current) => {
+            if (dir === -1 && !current) {
+              return currentItems[currentItems.length - 1]?.id ?? null;
+            }
+            const idx = current ? currentItems.findIndex((i) => i.id === current) : -1;
+            const nextIdx =
+              dir === 1
+                ? Math.min(currentItems.length - 1, idx + 1)
+                : Math.max(0, idx - 1);
+            const next = currentItems[nextIdx];
+            if (next?.id && next.id !== current) markAsReadLocally(next.id);
+            return next?.id ?? current;
+          });
+        }
+      };
+
       if (event.key === "j" || event.key === "ArrowDown") {
-        event.preventDefault();
-        setSelectedId((current) => {
-          const idx = current ? currentItems.findIndex((i) => i.id === current) : -1;
-          const next = currentItems[Math.min(currentItems.length - 1, idx + 1)];
-          return next?.id ?? current;
-        });
+        move(1);
       } else if (event.key === "k" || event.key === "ArrowUp") {
-        event.preventDefault();
-        setSelectedId((current) => {
-          if (!current) return currentItems[currentItems.length - 1]?.id ?? null;
-          const idx = currentItems.findIndex((i) => i.id === current);
-          const next = currentItems[Math.max(0, idx - 1)];
-          return next?.id ?? current;
-        });
+        move(-1);
       } else if (event.key === "Enter" || event.key === "o") {
         if (currentSelectedId) {
           event.preventDefault();
@@ -198,8 +267,45 @@ export function useMailShortcuts({
         onMailActionRef.current("markUnread", currentSelectedId);
       } else if (event.key === "r" && currentSelectedId) {
         event.preventDefault();
+        const item = currentItems.find((i) => i.id === currentSelectedId);
+        if (item) {
+          window.dispatchEvent(
+            new CustomEvent("mail:reply", {
+              detail: {
+                to: item.from || "",
+                subject: prefixSubject(item.subject, "Re:"),
+                threadId: item.threadId || item.id,
+              },
+            }),
+          );
+        }
+      } else if (event.key === "a" && currentSelectedId) {
+        event.preventDefault();
+        const item = currentItems.find((i) => i.id === currentSelectedId);
+        if (item) {
+          window.dispatchEvent(
+            new CustomEvent("mail:replyAll", {
+              detail: {
+                to: item.from || "",
+                subject: prefixSubject(item.subject, "Re:"),
+                threadId: item.threadId || item.id,
+              },
+            }),
+          );
+        }
       } else if (event.key === "f" && currentSelectedId) {
         event.preventDefault();
+        const item = currentItems.find((i) => i.id === currentSelectedId);
+        if (item) {
+          window.dispatchEvent(
+            new CustomEvent("mail:forward", {
+              detail: {
+                subject: prefixSubject(item.subject, "Fwd:"),
+                threadId: item.threadId || item.id,
+              },
+            }),
+          );
+        }
       } else if (event.key === "l" && currentSelectedId) {
         event.preventDefault();
       } else if (event.key === "?") {
@@ -212,5 +318,5 @@ export function useMailShortcuts({
       window.removeEventListener("keydown", onKey);
       if (gTimeoutRef.current) clearTimeout(gTimeoutRef.current);
     };
-  }, [setSelectedId]);
+  }, [setSelectedId, setSelectedIds]);
 }

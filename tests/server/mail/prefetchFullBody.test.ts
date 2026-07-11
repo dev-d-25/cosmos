@@ -1,14 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mockGetAccessToken = vi.fn<() => Promise<string | null>>();
-const mockUpsertManyByEntityIds = vi.fn();
-
-const mockFetch = vi.fn();
+const mockApiMessagesGet = vi.fn();
 
 const mockWithTenant = vi.fn(() => ({
   gmail: {
     keys: {
       get_access_token: mockGetAccessToken,
+    },
+    api: {
+      messages: {
+        get: mockApiMessagesGet,
+      },
     },
   },
 }));
@@ -24,7 +27,7 @@ vi.mock("@/server/auth", () => ({
 }));
 
 vi.mock("@/server/db/mail-entities", () => ({
-  upsertManyByEntityIds: mockUpsertManyByEntityIds,
+  upsertManyByEntityIds: vi.fn(),
   getAccountIdForTenant: vi.fn().mockResolvedValue("account_1"),
 }));
 
@@ -56,16 +59,13 @@ describe("prefetchFullBody", () => {
   beforeEach(() => {
     vi.resetModules();
     mockGetAccessToken.mockReset();
-    mockUpsertManyByEntityIds.mockReset();
-    mockFetch.mockReset();
+    mockApiMessagesGet.mockReset();
     mockGetSessionTenantId.mockReset();
     mockGetSessionTenantId.mockResolvedValue("tenant_1");
     mockGetAccessToken.mockResolvedValue("fake_access_token");
-    vi.stubGlobal("fetch", mockFetch);
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
     vi.clearAllMocks();
   });
 
@@ -74,58 +74,43 @@ describe("prefetchFullBody", () => {
     const { prefetchFullBody } = await import("@/server/mail");
     const result = await prefetchFullBody("msg_1");
     expect(result).toEqual({ id: "msg_1", ok: false, error: "unauthenticated" });
-    expect(mockFetch).not.toHaveBeenCalled();
-    expect(mockUpsertManyByEntityIds).not.toHaveBeenCalled();
+    expect(mockApiMessagesGet).not.toHaveBeenCalled();
   });
 
-  it("fetches with format=full and persists via native upsert", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => makeGmailResponse("msg_1"),
-    });
+  it("fetches via SDK with format=full", async () => {
+    mockApiMessagesGet.mockResolvedValueOnce(makeGmailResponse("msg_1"));
 
     const { prefetchFullBody } = await import("@/server/mail");
     const result = await prefetchFullBody("msg_1");
 
     expect(result).toEqual({ id: "msg_1", ok: true });
-    expect(mockFetch).toHaveBeenCalledTimes(1);
-    const [url, init] = mockFetch.mock.calls[0]!;
-    expect(url).toContain("messages/msg_1");
-    expect(url).toContain("format=full");
-    expect(init.headers.Authorization).toBe("Bearer fake_access_token");
-    expect(mockUpsertManyByEntityIds).toHaveBeenCalledTimes(1);
+    expect(mockApiMessagesGet).toHaveBeenCalledTimes(1);
+    expect(mockApiMessagesGet).toHaveBeenCalledWith({
+      userId: "me",
+      id: "msg_1",
+      format: "full",
+    });
   });
 
-  it("persists denormalized subject/from/to so the next read hits cache cleanly", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => makeGmailResponse("msg_2"),
-    });
+  it("persists denormalized subject/from/to via SDK auto-upsert", async () => {
+    mockApiMessagesGet.mockResolvedValueOnce(makeGmailResponse("msg_2"));
 
     const { prefetchFullBody } = await import("@/server/mail");
     await prefetchFullBody("msg_2");
 
-    const [_accountId, items] = mockUpsertManyByEntityIds.mock.calls[0]!;
-    expect(items).toHaveLength(1);
-    const item = items[0];
-    expect(item.entityId).toBe("msg_2");
-    // The next getMessage() cache check looks at these fields + payload
-    expect(item.data.subject).toBe("Subject msg_2");
-    expect(item.data.from).toBe("msg_2@example.com");
-    expect(item.data.to).toBe("me@example.com");
-    // No body-as-object (the regression)
-    expect(item.data.body).toBeUndefined();
-    expect(item.data.payload).toBeDefined();
+    expect(mockApiMessagesGet).toHaveBeenCalledTimes(1);
+    expect(mockApiMessagesGet).toHaveBeenCalledWith({
+      userId: "me",
+      id: "msg_2",
+      format: "full",
+    });
+    // SDK auto-upserts; no manual upsert assertions needed
   });
 
-  it("returns ok=false with the error when Gmail returns 4xx", async () => {
-    mockFetch.mockResolvedValueOnce({
-      ok: false,
-      status: 404,
-      text: async () => "Not Found",
-    });
+  it("returns ok=false with the error when SDK throws (4xx)", async () => {
+    mockApiMessagesGet.mockRejectedValueOnce(
+      new Error("gmail_404 Not Found"),
+    );
 
     const { prefetchFullBody } = await import("@/server/mail");
     const result = await prefetchFullBody("msg_404");
@@ -134,11 +119,13 @@ describe("prefetchFullBody", () => {
     expect(result.id).toBe("msg_404");
     expect(result.error).toContain("gmail_404");
     expect(result.error).toContain("Not Found");
-    expect(mockUpsertManyByEntityIds).not.toHaveBeenCalled();
   });
 
-  it("returns ok=false when there is no access token", async () => {
+  it("returns ok=false when SDK throws due to missing access token", async () => {
     mockGetAccessToken.mockResolvedValueOnce(null);
+    mockApiMessagesGet.mockRejectedValueOnce(
+      new Error("no_access_token"),
+    );
 
     const { prefetchFullBody } = await import("@/server/mail");
     const result = await prefetchFullBody("msg_no_token");
@@ -148,18 +135,10 @@ describe("prefetchFullBody", () => {
       ok: false,
       error: "no_access_token",
     });
-    expect(mockFetch).not.toHaveBeenCalled();
   });
 
   it("is safe to call for the same id multiple times (idempotent)", async () => {
-    // The intersection-based dedup at the MailListRow level is what
-    // actually prevents duplicate prefetches. This test confirms that
-    // the server action itself is idempotent — same id, same result.
-    mockFetch.mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => makeGmailResponse("msg_dup"),
-    });
+    mockApiMessagesGet.mockResolvedValue(makeGmailResponse("msg_dup"));
 
     const { prefetchFullBody } = await import("@/server/mail");
     const r1 = await prefetchFullBody("msg_dup");

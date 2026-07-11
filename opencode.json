@@ -4,5 +4,12 @@
     "external_directory": {
       "D:/corsair/**": "allow"
     }
+  },
+  "mcp": {
+    "brave": {
+      "type": "local",
+      "command": ["npx", "-y", "brave-devtools-mcp@latest", "--browserUrl", "http://localhost:9222"],
+      "enabled": true
+    }
   }
 }
