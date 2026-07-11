@@ -23,6 +23,6 @@ export function linkifyText(text: string | undefined | null): string {
   return safe.replace(URL_REGEX, (url) => {
     const href = url.replace(/[.,;:!?)]+$/, "");
     const trailing = url.slice(href.length);
-    return `<a href="${href}" target="_blank" rel="noopener noreferrer" class="text-primary underline underline-offset-2 hover:text-primary/80">${href}</a>${trailing}`;
+    return `<a href="${href}" target="_blank" rel="noopener" class="text-primary underline underline-offset-2 hover:text-primary/80">${href}</a>${trailing}`;
   });
 }

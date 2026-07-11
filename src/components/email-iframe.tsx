@@ -100,7 +100,7 @@ export function EmailIframe({ html, className, messageId, inlineImages }: EmailI
       ?.querySelectorAll<HTMLAnchorElement>("a[href]")
       .forEach((a) => {
         a.target = "_blank";
-        a.rel = "noopener noreferrer";
+        a.rel = "noopener";
       });
   }, []);
 
@@ -130,7 +130,7 @@ export function EmailIframe({ html, className, messageId, inlineImages }: EmailI
       ref={iframeRef}
       srcDoc={srcDoc}
       sandbox="allow-same-origin allow-popups"
-      referrerPolicy="no-referrer"
+      referrerPolicy="strict-origin-when-cross-origin"
       title="Email content"
       onLoad={onLoad}
       className={className}
