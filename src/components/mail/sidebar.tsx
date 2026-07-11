@@ -4,7 +4,7 @@ import { useMemo, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { SidebarItem } from "./sidebar-item";
 import { MAIL_LABELS } from "@/lib/mail/labels";
-import { SquarePenIcon, StarIcon } from "lucide-react";
+import { SquarePenIcon, StarIcon, BotIcon } from "lucide-react";
 import type { MailLabel, MailProfile } from "@/server/mail/schemas";
 
 const LABEL_ICONS: Record<string, ReactNode> = {
@@ -12,6 +12,11 @@ const LABEL_ICONS: Record<string, ReactNode> = {
     <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <polyline points="22 12 16 12 14 15 10 15 8 12 2 12" />
       <path d="M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z" />
+    </svg>
+  ),
+  IMPORTANT: (
+    <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+      <path d="M13 2L3 14h9l-1 10 10-12h-9l1-10z" />
     </svg>
   ),
   STARRED: <StarIcon size={14} className="shrink-0 opacity-70" />,
@@ -34,48 +39,6 @@ const LABEL_ICONS: Record<string, ReactNode> = {
       <circle cx="12" cy="12" r="10" />
       <line x1="12" y1="8" x2="12" y2="12" />
       <line x1="12" y1="16" x2="12.01" y2="16" />
-    </svg>
-  ),
-  IMPORTANT: (
-    <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M13 2L3 14h9l-1 10 10-12h-9l1-10z" />
-    </svg>
-  ),
-  UNREAD: (
-    <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <rect x="2" y="4" width="20" height="16" rx="2" />
-      <path d="M22 7l-10 7L2 7" />
-    </svg>
-  ),
-  CATEGORY_PERSONAL: (
-    <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-      <circle cx="12" cy="7" r="4" />
-    </svg>
-  ),
-  CATEGORY_SOCIAL: (
-    <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-      <circle cx="9" cy="7" r="4" />
-      <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-    </svg>
-  ),
-  CATEGORY_UPDATES: (
-    <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" />
-      <path d="M13.73 21a2 2 0 0 1-3.46 0" />
-    </svg>
-  ),
-  CATEGORY_PROMOTIONS: (
-    <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" />
-      <line x1="7" y1="7" x2="7.01" y2="7" />
-    </svg>
-  ),
-  CATEGORY_FORUMS: (
-    <svg className="shrink-0 opacity-70" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
     </svg>
   ),
 };
@@ -115,9 +78,6 @@ export function MailSidebar({
       <div className="bg-border mx-4 mb-2 h-px" />
 
       {MAIL_LABELS.map((def) => {
-        if (def.id.startsWith("divider-")) {
-          return <div key={def.id} className="bg-border mx-4 my-2 h-px" />;
-        }
         const label = def.gmailLabel ? labelMap.get(def.gmailLabel) : undefined;
         const unread = label?.messagesUnread;
         return (
@@ -132,6 +92,16 @@ export function MailSidebar({
           </SidebarItem>
         );
       })}
+
+      <div className="bg-border mx-4 my-2 h-px" />
+
+      <SidebarItem
+        active={activeLabel === "AGENT"}
+        href="/agent"
+      >
+        <BotIcon size={14} className="shrink-0 opacity-70" />
+        Agent
+      </SidebarItem>
 
       {(() => {
         const userLabels = labels.filter((l) => l.type === "user");

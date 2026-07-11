@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { markAsReadLocally } from "@/lib/read-emails";
+import { prefixSubject } from "@/lib/mail/format";
 
 export interface ShortcutGroup {
   title: string;
@@ -61,7 +62,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
 ];
 
 interface UseMailShortcutsOpts {
-  items: Array<{ id: string }>;
+  items: Array<{ id: string; threadId?: string; from?: string; subject?: string }>;
   selectedId: string | null;
   selectedIds: Set<string>;
   setSelectedId: React.Dispatch<React.SetStateAction<string | null>>;
@@ -266,8 +267,45 @@ export function useMailShortcuts({
         onMailActionRef.current("markUnread", currentSelectedId);
       } else if (event.key === "r" && currentSelectedId) {
         event.preventDefault();
+        const item = currentItems.find((i) => i.id === currentSelectedId);
+        if (item) {
+          window.dispatchEvent(
+            new CustomEvent("mail:reply", {
+              detail: {
+                to: item.from || "",
+                subject: prefixSubject(item.subject, "Re:"),
+                threadId: item.threadId || item.id,
+              },
+            }),
+          );
+        }
+      } else if (event.key === "a" && currentSelectedId) {
+        event.preventDefault();
+        const item = currentItems.find((i) => i.id === currentSelectedId);
+        if (item) {
+          window.dispatchEvent(
+            new CustomEvent("mail:replyAll", {
+              detail: {
+                to: item.from || "",
+                subject: prefixSubject(item.subject, "Re:"),
+                threadId: item.threadId || item.id,
+              },
+            }),
+          );
+        }
       } else if (event.key === "f" && currentSelectedId) {
         event.preventDefault();
+        const item = currentItems.find((i) => i.id === currentSelectedId);
+        if (item) {
+          window.dispatchEvent(
+            new CustomEvent("mail:forward", {
+              detail: {
+                subject: prefixSubject(item.subject, "Fwd:"),
+                threadId: item.threadId || item.id,
+              },
+            }),
+          );
+        }
       } else if (event.key === "l" && currentSelectedId) {
         event.preventDefault();
       } else if (event.key === "?") {
