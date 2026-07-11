@@ -515,6 +515,11 @@ export function MailInterface({
       <ComposeDialog
         open={composeOpen}
         onOpenChange={setComposeOpen}
+        mode={composeMode}
+        initialTo={composeInitial.to}
+        initialSubject={composeInitial.subject}
+        initialBody={composeInitial.body}
+        threadId={composeInitial.threadId}
       />
     </div>
   );
