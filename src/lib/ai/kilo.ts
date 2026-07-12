@@ -10,5 +10,3 @@ export const kilo = createOpenAI({
   baseURL: KILO_BASE_URL,
   apiKey: env.KILO_API_KEY ?? "",
 });
-
-export const DEFAULT_MODEL = env.KILO_DEFAULT_MODEL;
