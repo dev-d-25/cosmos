@@ -19,6 +19,7 @@ import {
 } from "@/components/ai-elements/prompt-input";
 import { ChatMarkdown } from "./chat-markdown";
 import { ChatToolPart } from "./chat-tool-part";
+import { type ChatMessagePart, getToolName } from "@/components/ai-elements/chat-shared";
 import { ChatEmptyState } from "./chat-empty-state";
 import { QUICK_ACTIONS } from "./quick-actions";
 import { Copy, Check, Loader2 } from "lucide-react";
@@ -33,16 +34,6 @@ interface ChatWindowProps {
   status: string;
   stop: () => void;
   disabled?: boolean;
-}
-
-interface MessagePart {
-  type: string;
-  text?: string;
-  state?: string;
-  toolCallId?: string;
-  input?: unknown;
-  output?: unknown;
-  errorText?: string;
 }
 
 function CopyButton({ text }: { text: string }) {
@@ -88,20 +79,13 @@ function AgentAvatar() {
   );
 }
 
-function isToolPart(p: MessagePart | undefined): boolean {
+function isToolPart(p: ChatMessagePart | undefined): boolean {
   if (!p) return false;
   if (p.type === "dynamic-tool") return true;
   return p.type?.startsWith("tool-") === true;
 }
 
-function getToolNameFromPart(p: MessagePart): string {
-  if (p.type === "dynamic-tool") {
-    return (p as MessagePart & { toolName?: string }).toolName ?? "unknown";
-  }
-  return p.type?.replace(/^tool-/, "") ?? "unknown";
-}
-
-function getToolStatusFromParts(parts: MessagePart[]): {
+function getToolStatusFromParts(parts: ChatMessagePart[]): {
   activeTool: string | null;
   completedCount: number;
   activeCount: number;
@@ -113,7 +97,7 @@ function getToolStatusFromParts(parts: MessagePart[]): {
   const completed = toolParts.filter((p) => p?.state === "output-available");
 
   if (active.length > 0 && active[0]) {
-    const name = getToolNameFromPart(active[0]).replace(/_/g, " ");
+    const name = getToolName(active[0]).replace(/_/g, " ");
     return {
       activeTool: name,
       completedCount: completed.length,
@@ -152,14 +136,6 @@ export function AIElementsChatWindow({
     return false;
   }, [messages, isStreaming]);
 
-  // Get tool status from all assistant messages
-  const toolStatus = useMemo(() => {
-    const allParts = messages
-      .filter((m) => m.role === "assistant")
-      .flatMap((m) => ((m.parts ?? []) as MessagePart[]));
-    return getToolStatusFromParts(allParts);
-  }, [messages]);
-
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       {/* Messages area */}
@@ -182,7 +158,7 @@ export function AIElementsChatWindow({
           <div className="mx-auto flex min-h-full min-w-0 max-w-3xl flex-col gap-5 px-2 py-6 md:gap-7 md:px-4">
             {messages.map((message, msgIdx) => {
               const role = message.role as "user" | "assistant" | "system";
-              const parts = (message.parts ?? []) as MessagePart[];
+              const parts = (message.parts ?? []) as ChatMessagePart[];
               const isLastMessage = msgIdx === messages.length - 1;
 
               // Extract reasoning

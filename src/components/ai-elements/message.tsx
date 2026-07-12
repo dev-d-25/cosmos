@@ -12,11 +12,8 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { cjk } from "@streamdown/cjk";
-import { code } from "@streamdown/code";
-import { math } from "@streamdown/math";
-import { mermaid } from "@streamdown/mermaid";
 import type { UIMessage } from "ai";
+import { streamdownPlugins } from "./chat-shared";
 import { ChevronLeftIcon, ChevronRightIcon } from "lucide-react";
 import type { ComponentProps, HTMLAttributes, ReactElement } from "react";
 import {
@@ -320,8 +317,6 @@ export const MessageBranchPage = ({
 };
 
 export type MessageResponseProps = ComponentProps<typeof Streamdown>;
-
-const streamdownPlugins = { cjk, code, math, mermaid };
 
 export const MessageResponse = memo(
   ({ className, ...props }: MessageResponseProps) => (

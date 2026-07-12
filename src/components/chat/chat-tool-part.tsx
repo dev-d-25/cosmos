@@ -5,16 +5,7 @@ import { ChevronDownIcon, WrenchIcon, CheckCircle2, XCircle, Loader2, Mail, Cale
 import { cn } from "@/lib/utils";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { Badge } from "@/components/ui/badge";
-
-interface ToolPart {
-  type: string;
-  toolCallId?: string;
-  toolName?: string;
-  state?: string;
-  input?: unknown;
-  output?: unknown;
-  errorText?: string;
-}
+import { type ChatMessagePart, getToolName } from "@/components/ai-elements/chat-shared";
 
 const TOOL_LABELS: Record<string, string> = {
   "corsair_setup": "Connecting to Gmail & Calendar",
@@ -23,19 +14,12 @@ const TOOL_LABELS: Record<string, string> = {
   "run_script": "Running script",
 };
 
-function getToolName(part: ToolPart): string {
-  if (part.type === "dynamic-tool") {
-    return part.toolName ?? "unknown";
-  }
-  return part.type.replace(/^tool-/, "");
-}
-
-function getToolLabel(part: ToolPart): string {
+function getToolLabel(part: ChatMessagePart): string {
   const name = getToolName(part);
   return TOOL_LABELS[name] ?? name.replace(/_/g, " ");
 }
 
-function getToolIcon(part: ToolPart) {
+function getToolIcon(part: ChatMessagePart) {
   const name = getToolName(part);
   if (name.includes("gmail") || name.includes("mail") || name.includes("send") || name.includes("email")) {
     return <Mail className="size-3.5" />;
@@ -49,7 +33,7 @@ function getToolIcon(part: ToolPart) {
   return <WrenchIcon className="size-3.5" />;
 }
 
-export function ChatToolPart({ part }: { part: ToolPart }) {
+export function ChatToolPart({ part }: { part: ChatMessagePart }) {
   const [isOpen, setIsOpen] = useState(false);
   const isComplete = part.state === "output-available";
   const isError = part.state === "output-error";
