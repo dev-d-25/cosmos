@@ -9,6 +9,7 @@ import { Badge } from "@/components/ui/badge";
 interface ToolPart {
   type: string;
   toolCallId?: string;
+  toolName?: string;
   state?: string;
   input?: unknown;
   output?: unknown;
@@ -22,13 +23,20 @@ const TOOL_LABELS: Record<string, string> = {
   "run_script": "Running script",
 };
 
-function getToolLabel(toolType: string): string {
-  const name = toolType.replace(/^tool-/, "");
+function getToolName(part: ToolPart): string {
+  if (part.type === "dynamic-tool") {
+    return part.toolName ?? "unknown";
+  }
+  return part.type.replace(/^tool-/, "");
+}
+
+function getToolLabel(part: ToolPart): string {
+  const name = getToolName(part);
   return TOOL_LABELS[name] ?? name.replace(/_/g, " ");
 }
 
-function getToolIcon(toolType: string) {
-  const name = toolType.replace(/^tool-/, "");
+function getToolIcon(part: ToolPart) {
+  const name = getToolName(part);
   if (name.includes("gmail") || name.includes("mail") || name.includes("send") || name.includes("email")) {
     return <Mail className="size-3.5" />;
   }
@@ -48,8 +56,8 @@ export function ChatToolPart({ part }: { part: ToolPart }) {
   const isActive =
     part.state === "input-streaming" || part.state === "input-available";
 
-  const label = getToolLabel(part.type);
-  const icon = getToolIcon(part.type);
+  const label = getToolLabel(part);
+  const icon = getToolIcon(part);
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
@@ -90,7 +98,7 @@ export function ChatToolPart({ part }: { part: ToolPart }) {
                   Input
                 </p>
                 <pre className="bg-background/50 overflow-x-auto rounded-none p-2 font-mono text-[11px]">
-                  <code>{JSON.stringify(part.input, null, 2)}</code>
+                  <code>{typeof part.input === "string" ? part.input : JSON.stringify(part.input, null, 2)}</code>
                 </pre>
               </div>
             )}
@@ -99,7 +107,7 @@ export function ChatToolPart({ part }: { part: ToolPart }) {
                 <p className="text-muted-foreground mb-1 text-[10px] font-medium uppercase tracking-wider">
                   Output
                 </p>
-                <pre className="bg-background/50 overflow-x-auto rounded-none p-2 font-mono text-[11px]">
+                <pre className="bg-background/50 max-h-[200px] overflow-auto rounded-none p-2 font-mono text-[11px]">
                   <code>
                     {typeof part.output === "string"
                       ? part.output
