@@ -35,7 +35,7 @@ export async function getCalendarPageData(opts: {
     return { tenantId: ctx.tenantId, calendarConnected: false };
   }
 
-  const [events, calendars] = await Promise.all([
+  const [eventsResult, calendarsResult] = await Promise.allSettled([
     getCalendarEvents({
       timeMin: opts.timeMin,
       timeMax: opts.timeMax,
@@ -44,11 +44,19 @@ export async function getCalendarPageData(opts: {
     getCalendarList(),
   ]);
 
+  // If events fetch failed due to missing OAuth, treat as not connected
+  // so the UI shows the Connect button instead of an empty grid.
+  const events = eventsResult.status === "fulfilled"
+    ? eventsResult.value
+    : { items: [], nextPageToken: null, source: "cache" as const };
+  const authFailed = events.source === "cache" && events.items.length === 0;
+
   return {
     tenantId: ctx.tenantId,
-    calendarConnected: true,
+    calendarConnected: !authFailed,
     events,
-    calendars,
+    calendars:
+      calendarsResult.status === "fulfilled" ? calendarsResult.value : [],
   };
 }
 
@@ -104,46 +112,51 @@ export async function getCalendarEvents(opts: {
   }
 
   // Fetch from Google Calendar API
-  const result = await ctx.client.googlecalendar.api.events.getMany({
-    calendarId,
-    timeMin: opts.timeMin,
-    timeMax: opts.timeMax,
-    maxResults: 250,
-    singleEvents: true,
-    orderBy: "startTime",
-  });
+  try {
+    const result = await ctx.client.googlecalendar.api.events.getMany({
+      calendarId,
+      timeMin: opts.timeMin,
+      timeMax: opts.timeMax,
+      maxResults: 250,
+      singleEvents: true,
+      orderBy: "startTime",
+    });
 
-  const events: CalendarEvent[] = (result.items ?? []).map((item) => ({
-    id: item.id ?? "",
-    summary: item.summary ?? "",
-    description: item.description ?? "",
-    location: item.location ?? "",
-    status: item.status ?? "confirmed",
-    start: item.start ? { date: item.start.date, dateTime: item.start.dateTime, timeZone: item.start.timeZone } : undefined,
-    end: item.end ? { date: item.end.date, dateTime: item.end.dateTime, timeZone: item.end.timeZone } : undefined,
-    isAllDay: Boolean(item.start?.date && !item.start?.dateTime),
-    attendees: (item.attendees ?? []).map((a) => ({
-      email: a.email,
-      displayName: a.displayName,
-      responseStatus: a.responseStatus,
-      self: a.self,
-    })),
-    htmlLink: item.htmlLink ?? "",
-    calendarId,
-    colorId: item.colorId,
-    recurrence: item.recurrence,
-    recurringEventId: item.recurringEventId,
-    visibility: item.visibility,
-    transparency: item.transparency,
-    createdAt: item.created,
-    updatedAt: item.updated,
-  }));
+    const events: CalendarEvent[] = (result.items ?? []).map((item) => ({
+      id: item.id ?? "",
+      summary: item.summary ?? "",
+      description: item.description ?? "",
+      location: item.location ?? "",
+      status: item.status ?? "confirmed",
+      start: item.start ? { date: item.start.date, dateTime: item.start.dateTime, timeZone: item.start.timeZone } : undefined,
+      end: item.end ? { date: item.end.date, dateTime: item.end.dateTime, timeZone: item.end.timeZone } : undefined,
+      isAllDay: Boolean(item.start?.date && !item.start?.dateTime),
+      attendees: (item.attendees ?? []).map((a) => ({
+        email: a.email,
+        displayName: a.displayName,
+        responseStatus: a.responseStatus,
+        self: a.self,
+      })),
+      htmlLink: item.htmlLink ?? "",
+      calendarId,
+      colorId: item.colorId,
+      recurrence: item.recurrence,
+      recurringEventId: item.recurringEventId,
+      visibility: item.visibility,
+      transparency: item.transparency,
+      createdAt: item.created,
+      updatedAt: item.updated,
+    }));
 
-  return {
-    items: events,
-    nextPageToken: result.nextPageToken ?? null,
-    source: "live",
-  };
+    return {
+      items: events,
+      nextPageToken: result.nextPageToken ?? null,
+      source: "live",
+    };
+  } catch (err) {
+    console.error("[calendar] Failed to fetch events from Google Calendar API:", err);
+    return { items: [], nextPageToken: null, source: "cache" as const };
+  }
 }
 
 export async function createCalendarEvent(input: {
