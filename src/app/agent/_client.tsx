@@ -2,10 +2,11 @@
 
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
+import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { ChatPanelProvider, useChatPanel } from "@/components/chat/chat-panel-provider";
 import { ChatThreadsList } from "@/components/chat/chat-threads-list";
-import { ChatWindow } from "@/components/chat/chat-window";
+import { AIElementsChatWindow as ChatWindow } from "@/components/chat/ai-elements-chat-window";
 import { ChatModelPicker } from "@/components/chat/chat-model-picker";
 import { useChat } from "@/hooks/use-chat";
 import {
@@ -14,11 +15,12 @@ import {
   useCreateThread,
   useDeleteThread,
   usePersistUserMessage,
+  chatKeys,
 } from "@/hooks/use-chat-threads";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
-import { MailTopNav } from "@/components/mail/mail-top-nav";
+import { TopBar } from "@/components/top-bar";
 import { PanelLeftIcon, PenSquareIcon } from "lucide-react";
 import {
   convertDbMessagesToUIMessages,
@@ -33,6 +35,7 @@ function AgentInner() {
     startNewThread,
     model,
     setModel,
+    reasoningEffort,
   } = useChatPanel();
 
   const hasInitializedFromUrl = useRef(false);
@@ -66,10 +69,29 @@ function AgentInner() {
   const threads = threadsQuery.data ?? [];
   const threadMessages = threadQuery.data?.messages ?? [];
 
-  const chat = useChat(activeThreadId, model);
+  const chat = useChat(activeThreadId, model, reasoningEffort);
+  const queryClient = useQueryClient();
 
   const [input, setInput] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(true);
+
+  // Invalidate thread query when stream ends so DB-fetched messages include
+  // the assistant message that was just persisted server-side.
+  const prevStatusRef = useRef(chat.status);
+  useEffect(() => {
+    const prev = prevStatusRef.current;
+    prevStatusRef.current = chat.status;
+    if (
+      activeThreadId &&
+      (prev === "streaming" || prev === "submitted") &&
+      chat.status !== "streaming" &&
+      chat.status !== "submitted"
+    ) {
+      queryClient.invalidateQueries({
+        queryKey: chatKeys.thread(activeThreadId),
+      });
+    }
+  }, [chat.status, activeThreadId, queryClient]);
 
   const convertedThreadMessages = useMemo(
     () => convertDbMessagesToUIMessages(threadMessages),
@@ -77,8 +99,7 @@ function AgentInner() {
   );
 
   const onSubmit = useCallback(
-    async (e: React.FormEvent) => {
-      e.preventDefault();
+    async () => {
       if (!input.trim()) return;
       if (chat.status === "streaming" || chat.status === "submitted") return;
 
@@ -182,36 +203,47 @@ function AgentInner() {
   const isStreaming = chat.status === "streaming" || chat.status === "submitted";
 
   const allMessages = useMemo(() => {
-    if (isStreaming && chat.messages.length > 0) {
-      return chat.messages;
+    const getText = (parts: unknown[]): string =>
+      (parts as { type: string; text?: string }[])
+        .filter((p) => p.type === "text")
+        .map((p) => p.text)
+        .join("");
+
+    // Merge DB history with live AI SDK messages.
+    // Dedup by both ID and content fingerprint to avoid duplicates.
+    if (chat.messages.length > 0) {
+      // Build sets of IDs and fingerprints from live AI SDK state
+      const liveIds = new Set(chat.messages.map((m) => m.id));
+      const liveFingerprints = new Set(
+        chat.messages.map((m) => `${m.role}:${getText(m.parts)}`),
+      );
+
+      // DB messages that are NOT already in chat.messages (by ID or content)
+      const historical = convertedThreadMessages.filter((m) => {
+        if (liveIds.has(m.id)) return false;
+        const fp = `${m.role}:${getText(m.parts)}`;
+        return !liveFingerprints.has(fp);
+      });
+
+      return [...historical, ...chat.messages];
     }
-    if (convertedThreadMessages.length > 0) {
-      return convertedThreadMessages;
-    }
-    return chat.messages;
-  }, [chat.messages, convertedThreadMessages, isStreaming]);
+    // Initial load before AI SDK initializes: fall back to DB data.
+    return convertedThreadMessages;
+  }, [chat.messages, convertedThreadMessages]);
 
   return (
     <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <MailTopNav
-        syncedState="Synced"
-        profile={null}
-        onRefresh={() => {}}
-        onClearCache={() => {}}
-        isRefreshing={false}
-        isClearing={false}
+      <TopBar
         onSearchOpen={() => router.push("/search")}
-        shortcutsOpen={false}
-        onShortcutsOpenChange={() => {}}
       />
       <div className="flex min-h-0 flex-1">
         {/* Sidebar */}
         <div
-          className={`border-border flex shrink-0 flex-col border-r transition-[width] duration-200 ${
+          className={`border-border flex h-full shrink-0 flex-col border-r transition-[width] duration-200 ${
             sidebarOpen ? "w-64" : "w-0"
           } overflow-hidden`}
         >
-          <div className="flex h-full w-64 flex-col">
+          <div className="flex h-full w-64 flex-col overflow-hidden">
             {/* New chat button */}
             <div className="p-2">
               <Button
@@ -226,7 +258,7 @@ function AgentInner() {
             </div>
 
             {/* Thread list */}
-            <ScrollArea className="flex-1">
+            <ScrollArea className="flex-1 overflow-hidden">
               <ChatThreadsList
                 threads={threads}
                 activeThreadId={activeThreadId}

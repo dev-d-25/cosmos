@@ -15,7 +15,7 @@ import {
 import { cn } from "@/lib/utils";
 import { ComposeDialog } from "@/components/compose-dialog";
 import { useMailShortcuts } from "@/hooks/use-mail-shortcuts";
-import { MailTopNav } from "@/components/mail/mail-top-nav";
+import { TopBar } from "@/components/top-bar";
 import { MailSidebar } from "@/components/mail/sidebar";
 import { MailList } from "@/components/mail/mail-list";
 import { MailViewer } from "@/components/mail/mail-viewer";
@@ -438,9 +438,8 @@ export function MailInterface({
 
   return (
     <div className="bg-background text-foreground flex h-screen flex-col overflow-hidden">
-      <MailTopNav
+      <TopBar
         syncedState={syncedState}
-        profile={profile}
         onRefresh={onRefresh}
         onClearCache={onClearCache}
         isRefreshing={refreshMutation.isPending}
