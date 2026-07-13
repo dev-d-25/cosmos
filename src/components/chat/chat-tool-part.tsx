@@ -5,15 +5,7 @@ import { ChevronDownIcon, WrenchIcon, CheckCircle2, XCircle, Loader2, Mail, Cale
 import { cn } from "@/lib/utils";
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { Badge } from "@/components/ui/badge";
-
-interface ToolPart {
-  type: string;
-  toolCallId?: string;
-  state?: string;
-  input?: unknown;
-  output?: unknown;
-  errorText?: string;
-}
+import { type ChatMessagePart, getToolName } from "@/components/ai-elements/chat-shared";
 
 const TOOL_LABELS: Record<string, string> = {
   "corsair_setup": "Connecting to Gmail & Calendar",
@@ -22,13 +14,13 @@ const TOOL_LABELS: Record<string, string> = {
   "run_script": "Running script",
 };
 
-function getToolLabel(toolType: string): string {
-  const name = toolType.replace(/^tool-/, "");
+function getToolLabel(part: ChatMessagePart): string {
+  const name = getToolName(part);
   return TOOL_LABELS[name] ?? name.replace(/_/g, " ");
 }
 
-function getToolIcon(toolType: string) {
-  const name = toolType.replace(/^tool-/, "");
+function getToolIcon(part: ChatMessagePart) {
+  const name = getToolName(part);
   if (name.includes("gmail") || name.includes("mail") || name.includes("send") || name.includes("email")) {
     return <Mail className="size-3.5" />;
   }
@@ -41,15 +33,15 @@ function getToolIcon(toolType: string) {
   return <WrenchIcon className="size-3.5" />;
 }
 
-export function ChatToolPart({ part }: { part: ToolPart }) {
+export function ChatToolPart({ part }: { part: ChatMessagePart }) {
   const [isOpen, setIsOpen] = useState(false);
   const isComplete = part.state === "output-available";
   const isError = part.state === "output-error";
   const isActive =
     part.state === "input-streaming" || part.state === "input-available";
 
-  const label = getToolLabel(part.type);
-  const icon = getToolIcon(part.type);
+  const label = getToolLabel(part);
+  const icon = getToolIcon(part);
 
   return (
     <Collapsible open={isOpen} onOpenChange={setIsOpen}>
@@ -90,7 +82,7 @@ export function ChatToolPart({ part }: { part: ToolPart }) {
                   Input
                 </p>
                 <pre className="bg-background/50 overflow-x-auto rounded-none p-2 font-mono text-[11px]">
-                  <code>{JSON.stringify(part.input, null, 2)}</code>
+                  <code>{typeof part.input === "string" ? part.input : JSON.stringify(part.input, null, 2)}</code>
                 </pre>
               </div>
             )}
@@ -99,7 +91,7 @@ export function ChatToolPart({ part }: { part: ToolPart }) {
                 <p className="text-muted-foreground mb-1 text-[10px] font-medium uppercase tracking-wider">
                   Output
                 </p>
-                <pre className="bg-background/50 overflow-x-auto rounded-none p-2 font-mono text-[11px]">
+                <pre className="bg-background/50 max-h-[200px] overflow-auto rounded-none p-2 font-mono text-[11px]">
                   <code>
                     {typeof part.output === "string"
                       ? part.output
