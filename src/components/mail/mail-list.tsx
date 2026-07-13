@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useEffect, useCallback } from "react";
+import { useRef, useEffect, useCallback, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn, decodeHtmlEntities } from "@/lib/utils";
 import { CheckIcon, Archive, Trash2, Star, MailOpen, X } from "lucide-react";
@@ -24,7 +24,7 @@ function MailListRow({
   item,
   isSelected,
   isMultiSelected,
-  isRead,
+  isUnread,
   onSelect,
   onOpen,
   onPrefetch,
@@ -32,7 +32,7 @@ function MailListRow({
   item: MailListItem;
   isSelected: boolean;
   isMultiSelected: boolean;
-  isRead: boolean;
+  isUnread: boolean;
   onSelect: (id: string, e?: React.MouseEvent) => void;
   onOpen?: (id: string) => void;
   onPrefetch: (id: string) => void;
@@ -41,6 +41,17 @@ function MailListRow({
   const firedRef = useRef(false);
   const onPrefetchRef = useRef(onPrefetch);
   onPrefetchRef.current = onPrefetch;
+
+  // Defer isReadLocally to client-only to avoid hydration mismatch.
+  // On server: always treat as unread (matches !item.unread).
+  // After hydration: check localStorage.
+  const [locallyRead, setLocallyRead] = useState(false);
+  useEffect(() => {
+    if (isUnread && isReadLocally(item.id)) {
+      setLocallyRead(true);
+    }
+  }, [item.id, isUnread]);
+  const isRead = !isUnread || locallyRead;
 
   useEffect(() => {
     const el = ref.current;
@@ -371,14 +382,13 @@ export function MailList({
         {items.map((item) => {
           const isSelected = selectedId === item.id;
           const isMultiSelected = selectedIds.has(item.id);
-          const isRead = !item.unread || isReadLocally(item.id);
           return (
             <MailListRow
               key={item.id}
               item={item}
               isSelected={isSelected}
               isMultiSelected={isMultiSelected}
-              isRead={isRead}
+              isUnread={item.unread}
               onSelect={onSelect}
               onOpen={onOpen}
               onPrefetch={onPrefetch}

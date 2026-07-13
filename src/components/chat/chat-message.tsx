@@ -199,7 +199,6 @@ function renderPart(
       >
         <ChatMarkdown
           text={part.text}
-          isAnimating={isStreaming && i > -1}
         />
       </div>
     );
@@ -209,7 +208,7 @@ function renderPart(
     return null;
   }
 
-  if (part.type?.startsWith("tool-")) {
+  if (part.type?.startsWith("tool-") || part.type === "dynamic-tool") {
     return <ChatToolPart key={part.toolCallId ?? i} part={part} />;
   }
 

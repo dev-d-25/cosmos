@@ -35,6 +35,9 @@ export function ChatModelPicker({ value, onChange }: ChatModelPickerProps) {
                 <Zap className="size-3 text-green-500" />
               )}
               <span>{model.label}</span>
+              <span className="text-muted-foreground ml-auto text-[10px]">
+                {model.provider === "opencode-zen" ? "Zen" : "Kilo"}
+              </span>
             </div>
           </SelectItem>
         ))}

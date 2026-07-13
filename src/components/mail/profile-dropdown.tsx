@@ -60,8 +60,8 @@ export function ProfileDropdown({ profile }: { profile: { emailAddress?: string;
           </div>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        <DropdownMenuItem>Profile</DropdownMenuItem>
-        <DropdownMenuItem>Settings</DropdownMenuItem>
+        <DropdownMenuItem disabled>Profile</DropdownMenuItem>
+        <DropdownMenuItem disabled>Settings</DropdownMenuItem>
         <DropdownMenuSeparator />
         <DropdownMenuItem>Sign out</DropdownMenuItem>
       </DropdownMenuContent>
