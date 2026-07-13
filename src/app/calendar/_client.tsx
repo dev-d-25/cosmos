@@ -19,6 +19,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Kbd } from "@/components/ui/kbd";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { ProfileDropdown } from "@/components/mail/profile-dropdown";
+import { TopBar } from "@/components/top-bar";
 import type { CalendarEvent, CalendarEventListResponse, CalendarInfo, CalendarPageData } from "@/server/calendar/types";
 import {
   useCalendarEvents,
@@ -27,6 +29,7 @@ import {
   useDeleteCalendarEvent,
   useRefreshCalendarEvents,
 } from "@/hooks/use-calendar";
+import { useMailProfile } from "@/hooks/use-mail";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -59,87 +62,6 @@ function getEventColorClasses(colorId?: string | null) {
     return { bg: c.bg, light: c.light, text: c.text, border: c.border, name: c.name };
   }
   return { bg: "bg-primary", light: "bg-primary/20", text: "text-primary", border: "border-primary", name: "" };
-}
-
-// ─── Top Navigation ───────────────────────────────────────────────────────────
-
-function CalendarTopNav({
-  onRefresh,
-  isRefreshing,
-  onSearchOpen,
-}: {
-  onRefresh: () => void;
-  isRefreshing: boolean;
-  onSearchOpen: () => void;
-}) {
-  return (
-    <nav className="border-border bg-card flex h-12 shrink-0 items-center gap-2 border-b px-4">
-      <div className="flex gap-0.5 text-xs font-medium">
-        <Link
-          href="/mail"
-          className={buttonVariants({ variant: "ghost", size: "sm" })}
-        >
-          Mail
-        </Link>
-        <Link
-          href="/calendar"
-          className={buttonVariants({ variant: "ghost", size: "sm", className: "bg-muted" })}
-        >
-          Calendar
-        </Link>
-        <Link
-          href="/agent"
-          className={buttonVariants({ variant: "ghost", size: "sm" })}
-        >
-          Agent
-        </Link>
-      </div>
-
-      <div className="relative min-w-0 flex-1">
-        <svg
-          className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-3.5 -translate-y-1/2"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-        >
-          <circle cx="11" cy="11" r="8" />
-          <path d="m21 21-4.35-4.35" />
-        </svg>
-        <input
-          className="border-border bg-muted text-foreground placeholder:text-muted-foreground h-8 w-full rounded-none border px-3 pr-14 pl-8 text-xs outline-none"
-          placeholder="Search events, people, or ask AI..."
-          onMouseDown={(e) => {
-            e.preventDefault();
-            onSearchOpen();
-          }}
-          readOnly
-        />
-        <span className="absolute top-1/2 right-2 -translate-y-1/2">
-          <Kbd className="text-[0.625rem]">Cmd K</Kbd>
-        </span>
-      </div>
-
-      <div className="flex items-center gap-2">
-        <div className="bg-border h-5 w-px" />
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="Refresh calendar"
-          className="size-8"
-          onClick={onRefresh}
-          disabled={isRefreshing}
-          title="Refresh calendar"
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2" />
-          </svg>
-        </Button>
-        <ThemeToggle />
-        <SignOutButton />
-      </div>
-    </nav>
-  );
 }
 
 // ─── Mini Calendar (Sidebar) ──────────────────────────────────────────────────
@@ -918,6 +840,8 @@ export function CalendarInterface({
   const router = useRouter();
   const calendarConnected =
     initial.calendarConnected || connectedPlugin === "googlecalendar";
+  const profileQuery = useMailProfile();
+  const profile = profileQuery.data ?? null;
 
   const [view, setView] = useState<ViewMode>(
     (initialView as ViewMode) || "week",
@@ -1094,7 +1018,7 @@ export function CalendarInterface({
 
   return (
     <div className="bg-background flex h-screen flex-col overflow-hidden">
-      <CalendarTopNav
+      <TopBar
         onRefresh={handleRefresh}
         isRefreshing={isRefreshing}
         onSearchOpen={() => router.push("/search")}

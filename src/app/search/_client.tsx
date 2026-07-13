@@ -5,21 +5,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ShortcutsHelp } from "@/components/shortcuts-help";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { SignOutButton } from "@/components/auth-buttons";
-import { Button, buttonVariants } from "@/components/ui/button";
+import { Button } from "@/components/ui/button";
 import { cn, decodeHtmlEntities, linkifyText } from "@/lib/utils";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { Kbd } from "@/components/ui/kbd";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { Badge } from "@/components/ui/badge";
-import { ThemeToggle } from "@/components/theme-toggle";
 import { EmailIframe } from "@/components/email-iframe";
 import {
   ResizableHandle,
@@ -40,6 +30,7 @@ import {
   useMailProfile,
 } from "@/hooks/use-mail";
 import { markAsReadLocally, isReadLocally } from "@/lib/read-emails";
+import { TopBar } from "@/components/top-bar";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -80,83 +71,6 @@ const QUICK_FILTERS = [
   { label: "Attachments", query: "has:attachment" },
   { label: "Archived", query: "-label:inbox" },
 ];
-
-// ─── Top Navigation ──────────────────────────────────────────────────────────
-
-function SearchTopNav({
-  profile,
-}: {
-  profile: { emailAddress?: string } | null;
-}) {
-  return (
-    <nav className="border-border bg-card flex h-12 shrink-0 items-center gap-2 border-b px-4">
-      <div className="flex gap-0.5 text-xs font-medium">
-        <Link
-          href="/mail"
-          className={buttonVariants({ variant: "ghost", size: "sm" })}
-        >
-          Mail
-        </Link>
-        <Link
-          href="/calendar"
-          className={buttonVariants({ variant: "ghost", size: "sm" })}
-        >
-          Calendar
-        </Link>
-        <Link
-          href="/agent"
-          className={buttonVariants({ variant: "ghost", size: "sm" })}
-        >
-          Agent
-        </Link>
-      </div>
-
-      <div className="flex items-center gap-2 ml-auto">
-        <div className="bg-border h-5 w-px" />
-        <ProfileDropdown profile={profile} />
-        <ThemeToggle />
-        <SignOutButton className="hidden h-8 px-3 text-[0.55rem] tracking-widest uppercase lg:flex" />
-      </div>
-    </nav>
-  );
-}
-
-// ─── Profile Dropdown ────────────────────────────────────────────────────────
-
-function ProfileDropdown({ profile }: { profile: { emailAddress?: string; name?: string } | null }) {
-  const email = profile?.emailAddress ?? "";
-  const displayName = profile?.name || email.split("@")[0] || "Account";
-  const initials = displayName.slice(0, 2).toUpperCase();
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger
-        render={
-          <button
-            type="button"
-            className="border-border bg-muted flex size-8 items-center justify-center border text-[0.625rem] font-bold tracking-wider uppercase"
-          />
-        }
-      >
-        {initials}
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56">
-        <DropdownMenuLabel className="font-normal">
-          <div className="flex flex-col gap-1">
-            <p className="text-sm font-medium leading-none">{displayName}</p>
-            <p className="text-muted-foreground text-xs leading-none">
-              {email}
-            </p>
-          </div>
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem>
-          <SignOutButton className="w-full" />
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
 
 // ─── Mail Toolbar Button ─────────────────────────────────────────────────────
 
@@ -847,7 +761,7 @@ export function SearchInterface({
 
   return (
     <div className="bg-background flex h-screen flex-col overflow-hidden">
-      <SearchTopNav profile={profile} />
+      <TopBar />
 
       {/* Search input area */}
       <div className="border-border bg-card shrink-0 border-b px-6 py-4">
