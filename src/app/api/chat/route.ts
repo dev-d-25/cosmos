@@ -27,6 +27,7 @@ const bodySchema = z.object({
   threadId: z.string().min(1),
   message: z.unknown() as z.ZodType<UIMessage>,
   model: z.string().min(1).optional(),
+  reasoningEffort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional(),
 });
 
 type UsageSnapshot = {
@@ -65,6 +66,8 @@ export async function POST(request: Request) {
   const { threadId, message } = parsed.data;
   const modelId = parsed.data.model ?? DEFAULT_MODEL;
   const modelOption = MODEL_OPTIONS.find((m) => m.id === modelId);
+  const reasoningEffort =
+    parsed.data.reasoningEffort ?? modelOption?.defaultReasoningEffort;
 
   const isZen = modelOption?.provider === "opencode-zen";
   const model = isZen ? opencodeZen.chat(modelId) : kilo.chat(modelId);
@@ -170,6 +173,15 @@ export async function POST(request: Request) {
     tools,
     messages: modelMessages,
     stopWhen: stepCountIs(10),
+    ...(isZen && reasoningEffort
+      ? {
+          providerOptions: {
+            deepseek: {
+              reasoningEffort,
+            },
+          },
+        }
+      : {}),
     onChunk: ({ chunk }) => {
       if (chunk.type === "text-delta") {
         process.stdout.write(chunk.text);
@@ -181,7 +193,12 @@ export async function POST(request: Request) {
         process.stdout.write(chunk.text);
       }
     },
-    onStepFinish: async ({ toolCalls, toolResults, text }) => {
+    onStepFinish: async ({ toolCalls, toolResults, text, usage: stepUsage }) => {
+      if (stepUsage) {
+        console.log("[chat/api] Step usage:", stepUsage);
+        if (stepUsage.inputTokens != null) usage.inputTokens = stepUsage.inputTokens;
+        if (stepUsage.outputTokens != null) usage.outputTokens = stepUsage.outputTokens;
+      }
       if (toolCalls && toolCalls.length > 0) {
         for (const tc of toolCalls) {
           console.log("\n[chat/api] Tool call:", {
@@ -201,7 +218,7 @@ export async function POST(request: Request) {
         }
       }
       if (text) {
-        console.log("\n[chat/api] Text step:", text.slice(0, 200));
+        console.log("[chat/api] Text step:", text.slice(0, 200));
       }
     },
     onFinish: async ({ response, usage: stepUsage }) => {
@@ -225,6 +242,7 @@ export async function POST(request: Request) {
   result.consumeStream();
 
   return result.toUIMessageStreamResponse({
+    sendReasoning: true,
     originalMessages: allMessages,
     generateMessageId: createIdGenerator({ prefix: "msg", size: 16 }),
     onError: (err) => (err instanceof Error ? err.message : "Unknown error"),
@@ -266,6 +284,13 @@ export async function POST(request: Request) {
         | undefined;
       const inputTokens = meta?.usage?.inputTokens ?? usage.inputTokens;
       const outputTokens = meta?.usage?.outputTokens ?? usage.outputTokens;
+
+      console.log("[chat/api] toUIMessageStreamResponse.onFinish:", {
+        metaUsage: meta?.usage,
+        closureUsage: usage,
+        resolvedInputTokens: inputTokens,
+        resolvedOutputTokens: outputTokens,
+      });
 
       await persistAssistant(
         responseMessage,

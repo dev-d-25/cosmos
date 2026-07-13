@@ -4,10 +4,17 @@ import { useChat as useAiChat } from "@ai-sdk/react";
 import { DefaultChatTransport } from "ai";
 import { useCallback, useRef } from "react";
 import { toast } from "sonner";
+import type { ReasoningEffort } from "@/components/chat/chat-panel-provider";
 
-export function useChat(threadId: string | null, model: string) {
+export function useChat(
+  threadId: string | null,
+  model: string,
+  reasoningEffort?: ReasoningEffort,
+) {
   const modelRef = useRef(model);
   modelRef.current = model;
+  const reasoningEffortRef = useRef(reasoningEffort);
+  reasoningEffortRef.current = reasoningEffort;
 
   const transport = new DefaultChatTransport({
     api: "/api/chat",
@@ -17,6 +24,9 @@ export function useChat(threadId: string | null, model: string) {
           threadId: id,
           message: messages[messages.length - 1],
           model: modelRef.current,
+          ...(reasoningEffortRef.current
+            ? { reasoningEffort: reasoningEffortRef.current }
+            : {}),
         },
       };
     },
@@ -25,6 +35,7 @@ export function useChat(threadId: string | null, model: string) {
   const chat = useAiChat({
     id: threadId ?? undefined,
     transport,
+    experimental_throttle: 50,
     onError: (err: Error) => {
       console.error("[chat] onError:", err);
       toast.error(err.message || "Something went wrong. Please try again.");
@@ -48,8 +59,8 @@ export function useChat(threadId: string | null, model: string) {
     ) => {
       console.log("[chat] sendWithPersist:", { text, threadId: opts.threadId });
 
+      const id = crypto.randomUUID();
       try {
-        const id = crypto.randomUUID();
         await opts.persistMessage({
           threadId: opts.threadId,
           id,
