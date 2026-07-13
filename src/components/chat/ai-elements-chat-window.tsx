@@ -29,7 +29,7 @@ interface ChatWindowProps {
   messages: UIMessage[];
   input: string;
   setInput: (v: string) => void;
-  onSubmit: (e: React.FormEvent) => void;
+  onSubmit: () => void;
   onSend?: (text: string) => void;
   status: string;
   stop: () => void;
@@ -117,12 +117,12 @@ export function AIElementsChatWindow({
   stop,
   disabled,
 }: ChatWindowProps) {
-  const { containerRef, endRef, scrollToBottom } = useScrollToBottom();
+  const { containerRef, scrollToBottom } = useScrollToBottom();
   const isStreaming = status === "streaming" || status === "submitted";
 
   const handleSubmit = (message: PromptInputMessage) => {
     if (message.text.trim()) {
-      onSubmit({ preventDefault: () => {} } as React.FormEvent);
+      onSubmit();
     }
   };
 
@@ -342,7 +342,7 @@ export function AIElementsChatWindow({
               </div>
             )}
 
-            <div className="min-h-[24px] min-w-[24px] shrink-0" ref={endRef} />
+            <div className="min-h-[24px] min-w-[24px] shrink-0" />
           </div>
         </div>
 

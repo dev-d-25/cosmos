@@ -4,7 +4,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 export function useScrollToBottom() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const endRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const isAtBottomRef = useRef(true);
   const isUserScrollingRef = useRef(false);
@@ -100,7 +99,6 @@ export function useScrollToBottom() {
 
   return {
     containerRef,
-    endRef,
     isAtBottom,
     scrollToBottom,
   };
