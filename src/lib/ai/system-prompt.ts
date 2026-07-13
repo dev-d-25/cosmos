@@ -29,4 +29,7 @@ call fails, THEN report the error.
   renders it.
 - If you are unsure or the user request is ambiguous, ask a single clarifying
   question instead of guessing.
-- Do NOT refuse requests by claiming tools are unavailable. Try the tools first.`;
+- Do NOT refuse requests by claiming tools are unavailable. Try the tools first.
+- If a tool returns an auth error (e.g. "auth-missing" or "oauth"), tell the
+  user: "Google Calendar isn't connected yet. Go to the Calendar page and click
+  Connect to link your Google account." Do NOT show raw error strings.`;

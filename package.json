@@ -22,6 +22,7 @@
     "test:chat": "tsx scripts/test-chat.ts"
   },
   "dependencies": {
+    "@ai-sdk/deepseek": "2.0.47",
     "@ai-sdk/mcp": "1.0.52",
     "@ai-sdk/openai": "3.0.72",
     "@ai-sdk/react": "3.0.209",
