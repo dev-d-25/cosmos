@@ -8,7 +8,9 @@ import {
 } from "ai";
 import { z } from "zod";
 
-import { kilo, DEFAULT_MODEL } from "@/lib/ai/kilo";
+import { kilo } from "@/lib/ai/kilo";
+import { opencodeZen } from "@/lib/ai/opencode-zen";
+import { MODEL_OPTIONS, DEFAULT_MODEL } from "@/lib/ai/model-options";
 import { getCorsairToolsForTenant } from "@/lib/ai/corsair-tools";
 import { SYSTEM_PROMPT } from "@/lib/ai/system-prompt";
 import { getSessionTenantId } from "@/server/auth";
@@ -62,6 +64,10 @@ export async function POST(request: Request) {
 
   const { threadId, message } = parsed.data;
   const modelId = parsed.data.model ?? DEFAULT_MODEL;
+  const modelOption = MODEL_OPTIONS.find((m) => m.id === modelId);
+
+  const isZen = modelOption?.provider === "opencode-zen";
+  const model = isZen ? opencodeZen.chat(modelId) : kilo.chat(modelId);
 
   const [thread] = await db
     .select()
@@ -74,7 +80,15 @@ export async function POST(request: Request) {
     return new Response("Thread not found", { status: 404 });
   }
 
-  if (!process.env.KILO_API_KEY) {
+  if (isZen && !process.env.OPENCODE_ZEN_API_KEY) {
+    console.log("[chat/api] OPENCODE_ZEN_API_KEY not set");
+    return new Response(
+      "OPENCODE_ZEN_API_KEY is not set. Add it to .env to enable chat.",
+      { status: 503 },
+    );
+  }
+
+  if (!isZen && !process.env.KILO_API_KEY) {
     console.log("[chat/api] KILO_API_KEY not set");
     return new Response(
       "KILO_API_KEY is not set. Add it to .env to enable chat.",
@@ -151,7 +165,7 @@ export async function POST(request: Request) {
   };
 
   const result = streamText({
-    model: kilo.chat(modelId),
+    model,
     system: SYSTEM_PROMPT,
     tools,
     messages: modelMessages,

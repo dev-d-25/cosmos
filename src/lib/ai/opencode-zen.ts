@@ -2,6 +2,8 @@ import "server-only";
 
 import { createDeepSeek } from "@ai-sdk/deepseek";
 
+import { env } from "@/env";
+
 export const OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/v1";
 
 /**
@@ -13,5 +15,5 @@ export const OPENCODE_ZEN_BASE_URL = "https://opencode.ai/zen/v1";
  */
 export const opencodeZen = createDeepSeek({
   baseURL: OPENCODE_ZEN_BASE_URL,
-  apiKey: process.env.OPENCODE_ZEN_API_KEY ?? "",
+  apiKey: env.OPENCODE_ZEN_API_KEY ?? "",
 });

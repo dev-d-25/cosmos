@@ -4,7 +4,7 @@ import { z } from "zod";
 import { getSessionTenantId } from "@/server/auth";
 import { createThread, listThreadsForUser } from "@/server/chat";
 import { createThreadSchema } from "@/server/chat/schemas";
-import { DEFAULT_MODEL } from "@/lib/ai/kilo";
+import { DEFAULT_MODEL } from "@/lib/ai/model-options";
 
 export async function GET() {
   const userId = await getSessionTenantId();
